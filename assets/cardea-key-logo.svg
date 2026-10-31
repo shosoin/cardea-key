@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="256" height="256" role="img" aria-label="Cardea Key">
+  <title>Cardea Key</title>
+  <style>@media (prefers-color-scheme: dark) { .k { stroke: #d39a5e; } }</style>
+  <g class="k" fill="none" stroke="#8a5a2b" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="5" y="5" width="54" height="54" rx="9"/>
+    <circle cx="21" cy="32" r="7.5"/>
+    <path d="M28.5 32 H49 M43 32 V39.5 M49 32 V38"/>
+  </g>
+</svg>

@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/cardea-key-logo.svg" alt="Cardea Key logo" width="128"></p>
+
 # Cardea Key
 
 > *Cardea*, Roman goddess of hinges and thresholds: "her power is to open what is shut and to shut
