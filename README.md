@@ -20,7 +20,7 @@ combines in a single firmware what usually needs several keys:
 Website: <https://cardeakey.org>
 
 > **Status: prototype, not audited.** Phase 0 (one unified firmware, tested on a bare Pico 2) is
-> complete. Do not rely on it as your only key yet. Next phases add an external secure element
+> complete and released as **v0.1.0**. Do not rely on it as your only key yet. Next phases add an external secure element
 > (NXP SE051) for the PIN and root keys, and a fingerprint sensor. See [Roadmap](#roadmap).
 
 ## How it is built
@@ -78,7 +78,9 @@ Main build options (`-D<option>=ON|OFF`):
 
 ## Flashing
 
-Hold BOOTSEL while plugging the Pico 2 in, then copy `cardea_key.uf2` to the `RP2350` drive. Data
+Download `cardea_key.uf2` from the [latest release](https://github.com/shosoin/cardea-key/releases/latest)
+(check its SHA-256) or build it yourself. Hold BOOTSEL while plugging the Pico 2 in, then copy
+`cardea_key.uf2` to the `RP2350` drive. Data
 on the key (PIN, credentials) survives firmware updates. A key already running Cardea Key can be
 rebooted into BOOTSEL with `scripts/cardea-bootsel.sh` (needs a button press).
 

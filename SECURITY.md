@@ -14,8 +14,8 @@ on a bare Raspberry Pi Pico 2 without a secure element. Use it to experiment, no
   NXP SE051 secure element.
 - User presence is a real button press (see `FORCE_BUTTON_WAIT`), and destructive operations
   (FIDO reset, master-key restore) require it. Master-key restore also requires the PIN.
-- Release binaries, when published, will not be signed. Building from source is the way to know
-  what runs on your key.
+- Release binaries are not signed; each release lists their SHA-256. Building from source is the way
+  to know what runs on your key.
 - The vault root CA private key is kept offline by the maintainers. A CA signature alone cannot
   enroll a key in a vault: enrollment also needs the key's PIN and a physical button press
   within a minute of plugging it in. You can build with your own CA (`docs/vault.md`).
