@@ -1,0 +1,100 @@
+diff --git a/picokeys_sdk_import.cmake b/picokeys_sdk_import.cmake
+index 365212e..74b7fb2 100644
+--- a/picokeys_sdk_import.cmake
++++ b/picokeys_sdk_import.cmake
+@@ -113,6 +113,40 @@ endif()
+ include(${CMAKE_CURRENT_LIST_DIR}/cmake/openssl.cmake)
+ include(${CMAKE_CURRENT_LIST_DIR}/cmake/build_helpers.cmake)
+ 
++# ---------------------------------------------------------------------------
++# key-v2: opciones de seguridad que decide quien compila.
++#
++# HARDEN_HARDWARE (OFF por defecto): "securizar el hardware".
++#   OFF -> el firmware NUNCA escribe la OTP del RP2350: ni MKEK ni clave de
++#          dispositivo ni bloqueo de paginas, y el comando de rescate "secure
++#          boot" se rechaza. La placa sigue siendo generica y reutilizable.
++#          Coste: sin MKEK, la clave base se deriva solo del numero de serie.
++#   ON  -> comportamiento original de upstream. IRREVERSIBLE: en el primer
++#          arranque escribe y bloquea la OTP, y permite activar secure boot
++#          con la clave de firma de UPSTREAM (la placa quedaria casada con su
++#          firmware). Solo en una placa dedicada y sabiendo lo que se hace.
++#
++# ENABLE_VAULT (ON por defecto): comandos "vault" de FIDO (CTAP vendor 0x05),
++#   OpenPGP y PIV (INS 0xF2). Permiten dar de alta una clave desde el host y
++#   EXPORTAR/IMPORTAR credenciales y claves cifradas con ella (copia de
++#   seguridad, pero tambien una via de sacar secretos con PIN + boton).
++#   OFF -> esos comandos responden "no soportado".
++# ---------------------------------------------------------------------------
++option(HARDEN_HARDWARE "Write/lock RP2350 OTP and allow upstream secure boot (IRREVERSIBLE)" OFF)
++if(HARDEN_HARDWARE)
++    add_compile_definitions(PICOKEYS_HARDEN_HARDWARE=1)
++    message(WARNING "HARDEN_HARDWARE=ON: el firmware ESCRIBIRA Y BLOQUEARA la OTP en el primer arranque (irreversible)")
++else()
++    message(STATUS "Hardware hardening:\t disabled (no OTP writes, no secure boot)")
++endif()
++option(ENABLE_VAULT "Enable vault enroll/export/import commands" ON)
++configure_bool_option(
++    ENABLE_VAULT
++    PICOKEYS_ENABLE_VAULT
++    "Vault export/import:\t enabled"
++    "Vault export/import:\t disabled"
++)
++
+ option(ENABLE_DELAYED_BOOT "Enable/disable delayed boot" OFF)
+ configure_bool_option(
+     ENABLE_DELAYED_BOOT
+diff --git a/src/otp/otp_rp2350.c b/src/otp/otp_rp2350.c
+index 49adcaa..4eecc31 100644
+--- a/src/otp/otp_rp2350.c
++++ b/src/otp/otp_rp2350.c
+@@ -46,7 +46,17 @@ static bool is_empty_buffer(const_byte_array_t buffer) {
+     return true;
+ }
+ 
++/*
++ * key-v2: la OTP del RP2350 es irreversible. Salvo que se compile con
++ * PICOKEYS_HARDEN_HARDWARE, este firmware NUNCA escribe en ella: es el unico
++ * punto de este fichero que llama a la ROM con OTP_CMD_WRITE_BITS.
++ */
+ static int otp_write_data_mode(uint16_t row, const_byte_array_t data, bool is_ecc) {
++#ifndef PICOKEYS_HARDEN_HARDWARE
++    (void)is_ecc;
++    printf("OTP write to row 0x%03x blocked (%u bytes): build with HARDEN_HARDWARE=OFF\n", row, (unsigned)data.len);
++    return BOOTROM_ERROR_NOT_PERMITTED;
++#endif
+     if (data.len > UINT16_MAX) {
+         return BOOTROM_ERROR_INVALID_STATE;
+     }
+@@ -198,6 +208,13 @@ bool otp_platform_is_secure_boot_locked(void) {
+ }
+ 
+ int otp_platform_enable_secure_boot(uint8_t bootkey, bool secure_lock) {
++#ifndef PICOKEYS_HARDEN_HARDWARE
++    /* key-v2: secure boot con la clave de upstream casaria la placa con su firmware. */
++    (void)bootkey;
++    (void)secure_lock;
++    printf("Secure boot disabled in this build (no OTP writes)\n");
++    return PICOKEYS_EXEC_ERROR;
++#endif
+     int ret = 0;
+ 
+     if (bootkey >= 6) {
+@@ -255,6 +272,18 @@ err:
+ }
+ 
+ void otp_platform_init(const uint8_t **otp_key_1_out, const uint8_t **otp_key_2_out) {
++#ifndef PICOKEYS_HARDEN_HARDWARE
++    /*
++     * key-v2: sin MKEK ni clave de dispositivo en OTP. No se migra, no se genera,
++     * no se escribe chaff y no se bloquea ninguna pagina (ni siquiera sw_lock,
++     * que es volatil). otp_init() (otp.c) toma entonces la MKEK de la flash
++     * (EF_MKEK) y rescue.c ya contempla otp_key_2 == NULL.
++     */
++    *otp_key_1_out = NULL;
++    *otp_key_2_out = NULL;
++    printf("OTP: read-only build, no keys in OTP\n");
++    return;
++#endif
+     otp_migrate_chaff();
+ 
+     int ret = 0;

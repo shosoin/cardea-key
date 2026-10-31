@@ -1,0 +1,39 @@
+# Patches on top of upstream
+
+`scripts/fetch-sources.sh` applies them in order, each one in `third_party/<repo>`
+(`NNNN-<repo>-<what>.patch`). Patches marked **upstream** fix bugs that the original
+pico-fido / pico-openpgp / pico-keys-sdk also have and could be proposed there. The rest are
+specific to Cardea Key (build options, unified firmware) and change nothing when each application
+is built on its own without `KEYV2_UNIFIED`. Code comments inside the patches are in Spanish.
+
+| Patch | Repo | What | Type |
+|---|---|---|---|
+| 0001 | pico-keys-sdk | Build options `HARDEN_HARDWARE` (OFF: no OTP writes, no secure boot) and `ENABLE_VAULT` | Cardea |
+| 0002 | pico-fido | `ENABLE_VAULT=OFF` removes the CTAP vault command | Cardea |
+| 0003 | pico-openpgp | `ENABLE_VAULT=OFF` removes `INS 0xF2` from OpenPGP and PIV | Cardea |
+| 0004 | pico-keys-sdk | Master key encryption key in flash (`EF_MKEK`) when OTP is not used; `SELECT` by longest AID match; configurable USB strings | Cardea (the `SELECT` part is also an upstream fix) |
+| 0005 | pico-fido | Unified firmware: external file table, configurable AAGUID, FIDO reset that does not touch other applications' files or vault records | Cardea |
+| 0006 | pico-openpgp | Unified firmware: keys in `0xA0-0xA5`, `EF_VAULT_KEY 0xCE05`, TERMINATE and PIV reset only touch their own data, FIDO file table included | Cardea |
+| 0007 | pico-fido | The OTP application re-pointed `res_APDU` from the HID callback and CTAP responses were lost (a button timeout arrived as OK) | **upstream** |
+| 0008 | pico-fido | `wait_button_pressed()` honours `FORCE_BUTTON_WAIT` (FIDO2 reset, U2F and OTP challenge-response did not require the button); from the USB task (core 0) it denies instead of waiting, which avoided a deadlock that hung the key | **upstream** |
+| 0009 | pico-openpgp | TERMINATE resets the OpenPGP PIN counters; the card was blocked after a factory reset | **upstream** |
+| 0010 | pico-openpgp | GET DATA per the specification: constructed DOs with their tag (no client guessing with `is_gpg`), key references 01/02/03 in `DE`, and `DE` inside `73`. Makes `ykman openpgp` work | **upstream** |
+| 0011 | pico-keys-sdk | Option `KEYV2_LED_PATTERNS`: no fades (on a single-GPIO LED everything ended up as 50 % blinking) and distinguishable patterns: idle = blink every 3 s, busy = fast, waiting for touch = steady on | Cardea (the fade problem on single-GPIO LEDs is upstream's) |
+| 0012 | pico-fido | The HID keyboard OTP path (core 0) overwrote the global `apdu` structure without restoring it: CCID hung, and with it `pcscd` and every program using it. Now it is not processed while the card is busy, and `apdu` is saved and restored | **upstream** |
+| 0013 | pico-keys-sdk | The card thread (core 1) runs on its own 16 KB stack in RAM. With the default 2 KB stack in SCRATCH_X, an OTP challenge-response over the HID keyboard (4.5 KB of stack on core 0) overflowed into core 1's stack and CCID stopped responding | **upstream** |
+| 0014 | pico-fido | OATH `PUT`: the YKOATH property is sent as `78 vv` (no length); upstream parsed it as a TLV and dropped it, so "touch" accounts returned codes without a press. Normalised to TLV | **upstream** |
+| 0015 | pico-keys-sdk | `button_wait_start_local()` / `button_local_result()`: asynchronous button wait (steady LED) whose result is polled, for USB-task paths that cannot block | Cardea (feature) |
+| 0016 | pico-fido | OTP challenge-response **with touch** over the HID keyboard in **asynchronous mode**, as YubiKeys do: status `0x20` while waiting, the response is computed on the press and expires after 15 s. Before, it was denied (and upstream hung the key) | Cardea (feature; suitable for upstream) |
+| 0017 | pico-keys-sdk | Configurable vault root CA (`PICOKEYS_VAULT_CA_INC`); Cardea Key compiles the "Cardea Key Vault CA" from `firmware/certs/cardea-key-vault-ca.crt` (option `KEYV2_VAULT_CA_CERT`; empty = upstream's CA) | Cardea |
+| 0018 | pico-keys-sdk | Vault enrollment: verify the certificate with mbedTLS's default profile plus Curve448. The default profile rejects the X448 key of the enrollment certificate (`BADCERT_BAD_KEY`), so no enrollment could ever succeed | **upstream** |
+| 0019 | pico-fido | Master-key restore (`CTAP_VENDOR_BACKUP` 0x02): upstream parsed `pinUvAuthParam` but never checked it, so a button press was enough to replace the master key and destroy every credential. With a PIN set it now requires a PIN token with the `acfg` permission and the exact blob size (60 B); without a PIN, the button only, like a reset | **upstream** |
+| 0020 | pico-fido | With `FORCE_BUTTON_WAIT`, `getAssertion` waits for the button. Before, with the default button timeout (0), it signed with UP=1 without a press. Only a credential with the button explicitly disabled (authenticatorConfig) skips it | **upstream** |
+| 0021 | pico-keys-sdk | Without git history (ZIP download, repository with no commits) the build number was empty and the build failed in `rescue.c`; it now defaults to 0 | **upstream** |
+
+## Regenerating
+
+Each patch is `git -C third_party/<repo> diff -- <files>`. Some patches touch the same file and
+are diffs on top of the previous ones: `0006` and `0009` (`src/openpgp/cmd_terminate_df.c`);
+`0007`, `0012` and `0016` (`src/fido/otp.c`); `0008` and `0020` (`src/fido/fido.c`); `0017` and
+`0018` (`src/vault.c`). Check: applying all patches to clean clones must reproduce the working tree
+and build without warnings.

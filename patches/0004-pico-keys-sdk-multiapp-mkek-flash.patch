@@ -1,0 +1,241 @@
+diff --git a/src/fs/file.c b/src/fs/file.c
+index f1d1a96..aef9222 100644
+--- a/src/fs/file.c
++++ b/src/fs/file.c
+@@ -35,6 +35,8 @@ extern const uintptr_t start_rom_pool;
+ #ifndef ENABLE_EMULATION
+ file_entry_t sef_phy = {.fid = EF_PHY, .parent = 5, .name = NULL, .type = FILE_TYPE_INTERNAL_EF | FILE_DATA_FLASH | FILE_PERSISTENT, .data = NULL, .ef_structure = FILE_EF_TRANSPARENT, .acl = {0xff}};
+ file_t *ef_phy = &sef_phy.file;
++file_entry_t sef_mkek = {.fid = EF_MKEK, .parent = 5, .name = NULL, .type = FILE_TYPE_INTERNAL_EF | FILE_DATA_FLASH | FILE_PERSISTENT, .data = NULL, .ef_structure = FILE_EF_TRANSPARENT, .acl = {0xff}};
++file_t *ef_mkek = &sef_mkek.file;
+ #endif
+ 
+ static const file_entry_t *file_static_entry(const file_t *file) {
+@@ -45,6 +47,9 @@ static const file_entry_t *file_static_entry(const file_t *file) {
+     if (file == ef_phy) {
+         return &sef_phy;
+     }
++    if (file == ef_mkek) {
++        return &sef_mkek;
++    }
+ #endif
+     uintptr_t addr = (uintptr_t)file - offsetof(file_entry_t, file);
+     uintptr_t first = (uintptr_t)&file_entries[0];
+@@ -173,6 +178,9 @@ file_t *file_search_by_fid(const uint16_t fid, const file_t *parent, const uint8
+     if (fid == EF_PHY) {
+         return ef_phy;
+     }
++    if (fid == EF_MKEK) {
++        return ef_mkek;
++    }
+ #endif
+     for (file_entry_t *p = file_entries; p != file_last; p++) {
+         if (p->fid != 0x0000 && p->fid == fid) {
+diff --git a/src/fs/file.h b/src/fs/file.h
+index 1f0b07c..912f748 100644
+--- a/src/fs/file.h
++++ b/src/fs/file.h
+@@ -170,6 +170,9 @@ extern int meta_add(uint16_t fid, const_byte_array_t data);
+ 
+ #ifndef ENABLE_EMULATION
+ extern file_t *ef_phy;
++/* key-v2: MKEK en flash (persistente, reescribible) cuando no se usa la OTP. */
++#define EF_MKEK     0xEF4B
++extern file_t *ef_mkek;
+ #endif
+ 
+ #endif // _FILE_H_
+diff --git a/src/main.c b/src/main.c
+index 7a910ac..4f33034 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -62,9 +62,34 @@ bool app_exists(const_byte_array_t aid) {
+     return false;
+ }
+ 
++/*
++ * key-v2: con varias apps, un AID registrado puede ser prefijo de otro (OTP
++ * A0000005272001 frente a PIV/YubiKey A000000527200101). Upstream comparaba por
++ * prefijo: el registro del segundo se descartaba en silencio y el SELECT iba a la
++ * primera que coincidiera. Ahora solo se descarta un AID identico y el SELECT elige
++ * la coincidencia mas larga.
++ */
++static bool app_aid_equal(const uint8_t *a, const uint8_t *b) {
++    return a[0] == b[0] && memcmp(a + 1, b + 1, a[0]) == 0;
++}
++
++static app_t *app_best_match(const_byte_array_t aid) {
++    app_t *best = NULL;
++    for (int a = 0; a < num_apps; a++) {
++        if (aid.len >= apps[a].aid[0] && !memcmp(apps[a].aid + 1, aid.data, apps[a].aid[0])) {
++            if (!best || apps[a].aid[0] > best->aid[0]) {
++                best = &apps[a];
++            }
++        }
++    }
++    return best;
++}
++
+ int register_app(int (*select_aid)(app_t *, uint8_t), const uint8_t *aid) {
+-    if (app_exists(CONST_BYTE_ARRAY(aid + 1, aid[0]))) {
+-        return 1;
++    for (int a = 0; a < num_apps; a++) {
++        if (app_aid_equal(apps[a].aid, aid)) {
++            return 1;
++        }
+     }
+     if (num_apps < sizeof(apps) / sizeof(app_t)) {
+         apps[num_apps].select_aid = select_aid;
+@@ -76,26 +101,24 @@ int register_app(int (*select_aid)(app_t *, uint8_t), const uint8_t *aid) {
+ }
+ 
+ int select_app(const_byte_array_t aid) {
+-    if (current_app && current_app->aid && (current_app->aid + 1 == aid.data || (aid.len >= current_app->aid[0] && !memcmp(current_app->aid + 1, aid.data, current_app->aid[0])))) {
++    if (current_app && current_app->aid && current_app->aid + 1 == aid.data) {
+         current_app->select_aid(current_app, 0);
+         return PICOKEYS_OK;
+     }
+-    for (int a = 0; a < num_apps; a++) {
+-        if (aid.len >= apps[a].aid[0] && !memcmp(apps[a].aid + 1, aid.data, apps[a].aid[0])) {
+-            if (current_app) {
+-                if (current_app->aid && aid.len >= current_app->aid[0] && !memcmp(current_app->aid + 1, aid.data, current_app->aid[0])) {
+-                    current_app->select_aid(current_app, 1);
+-                    return PICOKEYS_OK;
+-                }
+-                if (current_app->unload) {
+-                    current_app->unload();
+-                }
+-            }
+-            current_app = &apps[a];
+-            if (current_app->select_aid(current_app, 1) == PICOKEYS_OK) {
+-                return PICOKEYS_OK;
+-            }
+-        }
++    app_t *target = app_best_match(aid);
++    if (!target) {
++        return PICOKEYS_ERR_FILE_NOT_FOUND;
++    }
++    if (current_app == target) {
++        current_app->select_aid(current_app, 0);
++        return PICOKEYS_OK;
++    }
++    if (current_app && current_app->unload) {
++        current_app->unload();
++    }
++    current_app = target;
++    if (current_app->select_aid(current_app, 1) == PICOKEYS_OK) {
++        return PICOKEYS_OK;
+     }
+     return PICOKEYS_ERR_FILE_NOT_FOUND;
+ }
+@@ -170,12 +193,13 @@ int main(void) {
+ 
+     random_init();
+ 
+-    otp_init();
+-
+     low_flash_init();
+ 
+     file_scan_flash();
+ 
++    /* key-v2: tras montar el sistema de ficheros, para que la MKEK pueda venir de la flash. */
++    otp_init();
++
+     if (rescue_migrate_keydev() != PICOKEYS_OK) {
+         printf("Device attestation key migration failed\n");
+     }
+diff --git a/src/otp/otp.c b/src/otp/otp.c
+index d465192..dd3c946 100644
+--- a/src/otp/otp.c
++++ b/src/otp/otp.c
+@@ -18,6 +18,13 @@
+ #include "otp.h"
+ #include "otp_platform.h"
+ #include <stdlib.h>
++#include <string.h>
++#include <stdio.h>
++#include "picokeys.h"
++#include "file.h"
++#include "flash.h"
++#include "random.h"
++#include "mbedtls/platform_util.h"
+ 
+ const uint8_t *otp_key_1 = NULL;
+ const uint8_t *otp_key_2 = NULL;
+@@ -34,6 +41,40 @@ bool otp_is_secure_boot_locked(void) {
+     return otp_platform_is_secure_boot_locked();
+ }
+ 
++#ifndef ENABLE_EMULATION
++/*
++ * key-v2: si la plataforma no da MKEK (OTP vacia o HARDEN_HARDWARE=OFF), se usa una
++ * MKEK aleatoria de 32 B guardada en el fichero persistente EF_MKEK de la flash.
++ * NO es seguro frente a quien vuelque la flash: evita que kbase se derive solo del
++ * numero de serie (publico por USB) y deja un unico punto donde enchufar el SE.
++ * Los resets de las apps no la tocan; un borrado completo de la flash la regenera.
++ */
++static uint8_t mkek_flash[32];
++
++static void otp_mkek_from_flash(void) {
++    if (file_has_data(ef_mkek) && file_get_size(ef_mkek) == sizeof(mkek_flash)) {
++        memcpy(mkek_flash, file_get_data(ef_mkek), sizeof(mkek_flash));
++        otp_key_1 = mkek_flash;
++        printf("MKEK: loaded from flash\n");
++        return;
++    }
++    random_fill_buffer(BYTE_ARRAY(mkek_flash, sizeof(mkek_flash)));
++    if (file_put_data(ef_mkek, CONST_BYTE_ARRAY(mkek_flash, sizeof(mkek_flash))) != PICOKEYS_OK) {
++        printf("MKEK: could not store in flash, running without MKEK\n");
++        mbedtls_platform_zeroize(mkek_flash, sizeof(mkek_flash));
++        return;
++    }
++    flash_commit();
++    otp_key_1 = mkek_flash;
++    printf("MKEK: generated and stored in flash\n");
++}
++#endif
++
+ void otp_init(void) {
+     otp_platform_init(&otp_key_1, &otp_key_2);
++#ifndef ENABLE_EMULATION
++    if (otp_key_1 == NULL) {
++        otp_mkek_from_flash();
++    }
++#endif
+ }
+diff --git a/src/usb/usb_descriptors.c b/src/usb/usb_descriptors.c
+index b6b8c61..ae1328e 100644
+--- a/src/usb/usb_descriptors.c
++++ b/src/usb/usb_descriptors.c
+@@ -231,7 +231,11 @@ enum
+   VENDOR_REQUEST_WEBUSB = 1,
+   VENDOR_REQUEST_MICROSOFT = 2
+ };
+-#define URL  "www.picokeys.com"
++/* key-v2: pagina de destino WebUSB configurable (sin "https://": el esquema va en bScheme). */
++#ifndef USB_WEBUSB_URL
++#define USB_WEBUSB_URL "www.picokeys.com"
++#endif
++#define URL  USB_WEBUSB_URL
+ static bool web_serial_connected = false;
+ 
+ const tusb_desc_webusb_url_t desc_url =
+@@ -345,10 +349,16 @@ uint8_t const *tud_descriptor_bos_cb(void) {
+ 
+ // array of pointer to string descriptors
+ char *string_desc_itf[5] = {0};
++#ifndef USB_MANUFACTURER_STR
++#define USB_MANUFACTURER_STR "Pol Henarejos"
++#endif
++#ifndef USB_PRODUCT_STR
++#define USB_PRODUCT_STR "Pico Key"
++#endif
+ char const *string_desc_arr [] = {
+     (const char[]) { 0x09, 0x04 }, // 0: is supported language is English (0x0409)
+-    "Pol Henarejos",                     // 1: Manufacturer
+-    "Pico Key",                       // 2: Product
++    USB_MANUFACTURER_STR,                // 1: Manufacturer (key-v2: configurable)
++    USB_PRODUCT_STR,                     // 2: Product (key-v2: configurable)
+     "11223344",                      // 3: Serials, should use chip ID
+     "MAC"                   // 4: MAC address string, handled separately
+     , "HID Interface"

@@ -1,0 +1,49 @@
+diff --git a/src/fido/fido.c b/src/fido/fido.c
+index 93120fd..1f81958 100644
+--- a/src/fido/fido.c
++++ b/src/fido/fido.c
+@@ -16,6 +16,9 @@
+  */
+ 
+ #include "picokeys.h"
++#if defined(PICO_PLATFORM) && !defined(ENABLE_EMULATION)
++#include "pico.h"
++#endif
+ #include "button.h"
+ #include "fido.h"
+ #include "led/led.h"
+@@ -533,10 +536,34 @@ void init_fido(void) {
+ }
+ 
+ int wait_button_pressed(void) {
++#ifdef FORCE_BUTTON_WAIT
++    /* key-v2: con FORCE_BUTTON_WAIT el boton es obligatorio tambien aqui. Sin esto, con el
++       tiempo de boton por defecto (0) se daba la pulsacion por hecha en el reset de FIDO2
++       (cbor_reset), el registro y la autenticacion U2F (cmd_register/cmd_authenticate) y el
++       challenge-response OTP con "exigir toque". check_user_presence() ya lo hacia. */
++    bool previous_force_button_wait = force_button_wait;
++    force_button_wait = true;
++    int ret = wait_button_pressed_timeout(button_timeout_seconds());
++    force_button_wait = previous_force_button_wait;
++    return ret;
++#else
+     return wait_button_pressed_timeout(button_timeout_seconds());
++#endif
+ }
+ 
+ int wait_button_pressed_timeout(uint32_t timeout_seconds) {
++#if defined(PICO_PLATFORM) && !defined(ENABLE_EMULATION)
++    /*
++     * key-v2: la espera del boton depende de la tarea USB (nucleo 0), que es quien lee el boton,
++     * enciende el LED y devuelve EV_BUTTON_*. Si nos llaman desde esa misma tarea (p. ej. el
++     * challenge-response OTP que llega por GET/SET_REPORT del teclado HID), bloquear aqui es un
++     * interbloqueo: la llave se queda colgada. En ese contexto no se puede esperar: si hace falta
++     * presencia, se deniega. Soportarlo de verdad exige el modo asincrono de las YubiKey.
++     */
++    if (get_core_num() == 0 && (timeout_seconds != 0 || force_button_wait)) {
++        return 1;
++    }
++#endif
+     if (timeout_seconds != 0 || force_button_wait) {
+         uint8_t operation = current_fido_operation;
+         event_field_t fields[2];

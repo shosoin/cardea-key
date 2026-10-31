@@ -1,0 +1,1 @@
+../third_party/pico-keys-sdk/pico_sdk_import.cmake

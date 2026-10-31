@@ -1,0 +1,180 @@
+diff --git a/src/openpgp/cmd_terminate_df.c b/src/openpgp/cmd_terminate_df.c
+index 9be591d..7efbf62 100644
+--- a/src/openpgp/cmd_terminate_df.c
++++ b/src/openpgp/cmd_terminate_df.c
+@@ -23,7 +23,17 @@ static bool pw3_verifier_unusable(void) {
+     return !pw3 || !file_has_data(pw3) || file_get_size(pw3) < 3 || file_get_data(pw3)[0] == 0;
+ }
+ 
++#ifdef KEYV2_UNIFIED
++extern bool keyv2_fid_is_foreign_to_openpgp(uint16_t fid);
++#endif
++
+ static bool openpgp_terminate_preserve_fid(uint16_t fid) {
++#ifdef KEYV2_UNIFIED
++    /* key-v2: TERMINATE solo borra lo de OpenPGP; FIDO/OATH/OTP y los ficheros comunes se quedan. */
++    if (keyv2_fid_is_foreign_to_openpgp(fid)) {
++        return true;
++    }
++#endif
+     if (fid == EF_PW_PRIV || fid == EF_PW_RETRIES || fid == EF_DEK_PWPIV || fid == EF_META || fid == EF_VAULT_KEY) {
+         return true;
+     }
+diff --git a/src/openpgp/files.c b/src/openpgp/files.c
+index 38bff2c..4e5eecd 100644
+--- a/src/openpgp/files.c
++++ b/src/openpgp/files.c
+@@ -498,6 +498,11 @@ file_entry_t file_entries[] = {
+     /* 141 */ { .fid = EF_VAULT_KEY, .parent = 0, .name = NULL,
+                .type = FILE_TYPE_INTERNAL_EF | FILE_DATA_FLASH, .data = NULL,
+                .ef_structure = FILE_EF_TRANSPARENT, .acl = ACL_NONE },
++#ifdef KEYV2_UNIFIED
++    /* key-v2: entradas de FIDO (todas con padre 0 = MF). Van antes de las dos ultimas
++       porque file_openpgp se calcula como la penultima. */
++#include "fido_file_entries.inc"
++#endif
+     /* 142 */ { .fid = 0x0000, .parent = 0, .name = openpgp_aid, .type = FILE_TYPE_WORKING_EF,
+                .data = NULL, .ef_structure = FILE_EF_TRANSPARENT, .acl = ACL_RO },
+     /* 143 */ { .fid = 0x0000, .parent = 0xff, .name = NULL, .type = FILE_TYPE_NOT_KNOWN, .data = NULL,
+diff --git a/src/openpgp/files.h b/src/openpgp/files.h
+index 5e9ee6d..fa8351c 100644
+--- a/src/openpgp/files.h
++++ b/src/openpgp/files.h
+@@ -40,7 +40,11 @@
+ #define EF_DEK_RC       0x109b
+ #define EF_DEK_PW3      0x109c
+ #define EF_DEK_PWPIV    0x109d
++#ifdef KEYV2_UNIFIED
++#define EF_VAULT_KEY    0xce05  /* key-v2: 0xce03 es el EF_VAULT_KEY de FIDO */
++#else
+ #define EF_VAULT_KEY    0xce03
++#endif
+ #define EF_CH_1         0x1f21
+ #define EF_CH_2         0x1f22
+ #define EF_CH_3         0x1f23
+diff --git a/src/openpgp/key_container.c b/src/openpgp/key_container.c
+index 0401561..8941d8f 100644
+--- a/src/openpgp/key_container.c
++++ b/src/openpgp/key_container.c
+@@ -21,12 +21,22 @@
+ #include "object_provider.h"
+ #include "openpgp.h"
+ 
++#ifdef KEYV2_UNIFIED
++/* key-v2: 0xD0-0xDC son de los contenedores de FIDO (y su reset los borra). */
++#define OPENPGP_KEY_MANIFEST_SLOT_0_PREFIX 0xa0u
++#define OPENPGP_KEY_MANIFEST_SLOT_1_PREFIX 0xa1u
++#define OPENPGP_KEY_PRIVATE_SLOT_0_PREFIX 0xa2u
++#define OPENPGP_KEY_PUBLIC_SLOT_0_PREFIX 0xa3u
++#define OPENPGP_KEY_PRIVATE_SLOT_1_PREFIX 0xa4u
++#define OPENPGP_KEY_PUBLIC_SLOT_1_PREFIX 0xa5u
++#else
+ #define OPENPGP_KEY_MANIFEST_SLOT_0_PREFIX 0xd0u
+ #define OPENPGP_KEY_MANIFEST_SLOT_1_PREFIX 0xd1u
+ #define OPENPGP_KEY_PRIVATE_SLOT_0_PREFIX 0xd2u
+ #define OPENPGP_KEY_PUBLIC_SLOT_0_PREFIX 0xd3u
+ #define OPENPGP_KEY_PRIVATE_SLOT_1_PREFIX 0xd4u
+ #define OPENPGP_KEY_PUBLIC_SLOT_1_PREFIX 0xd5u
++#endif
+ #define OPENPGP_KEY_CONTAINER_COMMIT_TIMEOUT_MS 5000u
+ #define OPENPGP_KEY_CONTAINER_POLICY_ID 0x0500u
+ #define OPENPGP_KEY_CONTAINER_MARKER_SIZE 10u
+diff --git a/src/piv/cmd_reset.c b/src/piv/cmd_reset.c
+index fe9da9e..f7519d4 100644
+--- a/src/piv/cmd_reset.c
++++ b/src/piv/cmd_reset.c
+@@ -19,6 +19,78 @@
+ #include "piv.h"
+ 
+ 
++#ifdef KEYV2_UNIFIED
++static bool piv_reset_owned_fid(uint16_t fid) {
++    return fid == EF_DEK_PWPIV || fid == EF_PIV_PIN || fid == EF_PIV_PUK || fid == EF_PIV_DISCOVERY ||
++           fid == EF_PIV_BITGT || (fid >= EF_PIV_ADMIN_DATA && fid <= EF_PIV_MSROOTS5) ||
++           (fid >= EF_PIV_CARD_AUTH && fid <= EF_PIV_PC_REF_DATA);
++}
++
++typedef struct piv_reset_context {
++    int value;
++} piv_reset_context_t;
++
++static bool piv_reset_dynamic(file_t *file, void *ctx) {
++    piv_reset_context_t *context = (piv_reset_context_t *)ctx;
++    if (!piv_reset_owned_fid(file->fid)) {
++        return true;
++    }
++    file_delete_result_t result = file_delete_no_commit_parts(file);
++    if (result.value != PICOKEYS_OK) {
++        context->value = result.value;
++        return false;
++    }
++    return true;
++}
++
++static int piv_reset_storage(void) {
++    /* Claves PIV (contenedores) y sus metadatos */
++    for (uint16_t key = 0; key <= 0xff; key++) {
++        if (openpgp_key_container_is_piv(key)) {
++            int r = openpgp_key_container_delete(key, true);
++            if (r != PICOKEYS_OK && r != PICOKEYS_ERR_FILE_NOT_FOUND) {
++                return r;
++            }
++            meta_delete_no_commit(key);
++        }
++    }
++    /* Ficheros PIV de la tabla estatica */
++    for (file_entry_t *entry = file_entries; entry != file_last; entry++) {
++        file_t *file = &entry->file;
++        if (file->fid != 0 && piv_reset_owned_fid(file->fid) && (file_get_type(file) & FILE_DATA_FLASH) && file_has_data(file)) {
++            file_delete_result_t result = file_delete_no_commit_parts(file);
++            if (result.value != PICOKEYS_OK) {
++                return result.value;
++            }
++        }
++    }
++    /* Ficheros PIV dinamicos */
++    piv_reset_context_t context = { .value = PICOKEYS_OK };
++    file_for_each_dynamic(piv_reset_dynamic, &context);
++    if (context.value != PICOKEYS_OK) {
++        return context.value;
++    }
++    /* Reintentos de PIN/PUK de PIV a 3 (bytes 7-8 de EF_PW_PRIV, 4-5 de EF_PW_RETRIES) */
++    file_t *ef = file_search_by_fid(EF_PW_RETRIES, NULL, SPECIFY_EF);
++    if (ef && file_get_size(ef) >= 6) {
++        uint8_t retries[16];
++        uint16_t len = (uint16_t)MIN(file_get_size(ef), sizeof(retries));
++        memcpy(retries, file_get_data(ef), len);
++        retries[4] = retries[5] = 3;
++        file_put_data(ef, CONST_BYTE_ARRAY(retries, len));
++    }
++    ef = file_search_by_fid(EF_PW_PRIV, NULL, SPECIFY_EF);
++    if (ef && file_get_size(ef) >= 9) {
++        uint8_t status[16];
++        uint16_t len = (uint16_t)MIN(file_get_size(ef), sizeof(status));
++        memcpy(status, file_get_data(ef), len);
++        status[7] = status[8] = 3;
++        file_put_data(ef, CONST_BYTE_ARRAY(status, len));
++    }
++    return PICOKEYS_OK;
++}
++#endif
++
+ int cmd_reset(void) {
+     if (P1(apdu) != 0x0 || P2(apdu) != 0x0) {
+         return SW_INCORRECT_P1P2();
+@@ -32,7 +104,15 @@ int cmd_reset(void) {
+     if (retPIN != 0 || retPUK != 0) {
+         return SW_INCORRECT_PARAMS();
+     }
++#ifdef KEYV2_UNIFIED
++    /* key-v2: upstream hace file_initialize_flash(true), que vacia TODO el pool de datos
++       (credenciales FIDO, OATH, claves OpenPGP...). Aqui solo se borra lo de PIV. */
++    if (piv_reset_storage() != PICOKEYS_OK) {
++        return SW_EXEC_ERROR();
++    }
++#else
+     file_initialize_flash(true);
++#endif
+     flash_commit();
+     init_piv();
+     return SW_OK();

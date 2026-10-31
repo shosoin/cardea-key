@@ -1,0 +1,173 @@
+--- a/src/fido/otp.c
++++ b/src/fido/otp.c
+@@ -19,6 +19,9 @@
+ #include "picokeys.h"
+ #include "serial.h"
+ #include "button.h"
++#if defined(PICO_PLATFORM) && !defined(ENABLE_EMULATION)
++#include "pico.h"
++#endif
+ #include "fido.h"
+ #include "apdu.h"
+ #include "files.h"
+@@ -582,6 +585,12 @@
+ }
+ 
+ uint8_t status_byte = 0x0;
++/* key-v2: challenge-response con toque por el teclado HID en modo asincrono (como las YubiKey):
++   la peticion queda pendiente con el estado 0x20 ("esperando toque") y se completa cuando el host,
++   que consulta el estado periodicamente, la vuelve a pedir tras la pulsacion. */
++#define OTP_SW_TOUCH_PENDING 0x6F20
++#define OTP_TOUCH_TIMEOUT_S  15
++static bool otp_touch_confirmed = false;
+ static uint16_t otp_status_ext(void) {
+     for (uint8_t i = 0; i < 4; i++) {
+         uint16_t fid = (uint16_t)(EF_OTP_SLOT1 + i);
+@@ -982,7 +991,15 @@
+             }
+             int ret = 0;
+             uint8_t *rdata_bk = apdu.rdata;
+-            if (otp_config->cfg_flags & CHAL_BTN_TRIG) {
++            if ((otp_config->cfg_flags & CHAL_BTN_TRIG) && !otp_touch_confirmed) {
++#if defined(PICO_PLATFORM) && !defined(ENABLE_EMULATION)
++                if (_is_otp && get_core_num() == 0) {
++                    /* Teclado HID (tarea USB): no se puede bloquear esperando el boton. */
++                    status_byte = 0x20;
++                    mbedtls_platform_zeroize(data, sizeof(data));
++                    return OTP_SW_TOUCH_PENDING;
++                }
++#endif
+                 status_byte = 0x20;
+                 otp_status(_is_otp);
+ #ifndef ENABLE_EMULATION
+@@ -1089,6 +1106,47 @@
+     return 0;
+ }
+ 
++static uint8_t otp_pending_frame[sizeof(otp_frame_rx)];
++static bool otp_touch_pending = false, otp_touch_pressed = false;
++
++/*
++ * Procesa una trama OTP completa (64 B de datos + comando en [64]) y deja la respuesta en el buffer
++ * de envio. Corre en la tarea USB (nucleo 0). key-v2: si el hilo de la tarjeta esta ocupado no se
++ * toca 'apdu' (devuelve -1); si no, se guarda y se restaura (upstream lo dejaba corrompido y la CCID
++ * se quedaba colgada). Con 'touch_confirmed' el toque ya se ha dado (modo asincrono).
++ */
++static int otp_run_frame(uint8_t *frame, bool touch_confirmed) {
++    if (is_busy()) {
++        return -1;
++    }
++    static uint8_t hdr[5];
++    struct apdu apdu_saved = apdu;
++    apdu.header = hdr;
++    apdu.data = frame;
++    apdu.nc = 64;
++    apdu.rdata = otp_frame_tx;
++    apdu.rlen = 0;
++    apdu.header[0] = 0;
++    apdu.header[1] = 0x01;
++    apdu.header[2] = frame[64];
++    apdu.header[3] = 0;
++    _is_otp = true;
++    otp_touch_confirmed = touch_confirmed;
++    int ret = otp_process_apdu();
++    otp_touch_confirmed = false;
++    if (ret == 0x9000 && res_APDU_size > 0) {
++        otp_send_frame(apdu.rdata, apdu.rlen);
++    }
++    _is_otp = false;
++    apdu = apdu_saved;
++    return ret;
++}
++
++static void otp_touch_clear(void) {
++    otp_touch_pending = otp_touch_pressed = false;
++    mbedtls_platform_zeroize(otp_pending_frame, sizeof(otp_pending_frame));
++}
++
+ static int otp_hid_set_report_cb(uint8_t itf, uint8_t report_id, hid_report_type_t report_type, uint8_t const *buffer, uint16_t bufsize) {
+     (void)itf;
+     (void)report_id;
+@@ -1096,6 +1154,11 @@
+     if (report_type == 3) {
+         DEBUG_PAYLOAD(buffer, bufsize);
+         if (buffer[7] == 0xFF) { // reset
++            if (otp_touch_pending) { /* key-v2: el host cancela la espera del toque */
++                cancel_button = true;
++                otp_touch_clear();
++                status_byte = 0x00;
++            }
+             *get_send_buffer_size(ITF_KEYBOARD) = 0;
+             otp_curr_seq = otp_exp_seq = 0;
+             memset(otp_frame_tx, 0, sizeof(otp_frame_tx));
+@@ -1113,36 +1176,18 @@
+                     uint16_t residual_crc = calculate_crc(otp_frame_rx, 64), rcrc = get_uint16_le(otp_frame_rx + 65);
+                     uint8_t slot_id = otp_frame_rx[64];
+                     if (residual_crc == rcrc) {
+-                        /*
+-                         * key-v2: este callback corre en la tarea USB (nucleo 0) y upstream
+-                         * sobrescribia la estructura global 'apdu' (con 'header' apuntando a una
+-                         * variable local) sin restaurarla. Si el hilo de la tarjeta (nucleo 1) estaba
+-                         * atendiendo una orden CCID (pcscd, navegadores...), se corrompia y la CCID se
+-                         * quedaba colgada. Ahora: si la tarjeta esta ocupada no se procesa (el host
+-                         * reintenta); si esta libre, se guarda y se restaura 'apdu'.
+-                         */
+-                        if (is_busy()) {
++                        (void)slot_id;
++                        int ret = otp_run_frame(otp_frame_rx, false);
++                        if (ret < 0) {
+                             printf("[OTP] card busy, frame ignored\n");
+-                            return 1;
+                         }
+-                        static uint8_t hdr[5];
+-                        struct apdu apdu_saved = apdu;
+-                        apdu.header = hdr;
+-                        apdu.data = otp_frame_rx;
+-                        apdu.nc = 64;
+-                        apdu.rdata = otp_frame_tx;
+-                        apdu.rlen = 0;
+-                        apdu.header[0] = 0;
+-                        apdu.header[1] = 0x01;
+-                        apdu.header[2] = slot_id;
+-                        apdu.header[3] = 0;
+-                        _is_otp = true;
+-                        int ret = otp_process_apdu();
+-                        if (ret == 0x9000 && res_APDU_size > 0) {
+-                            otp_send_frame(apdu.rdata, apdu.rlen);
++                        else if (ret == OTP_SW_TOUCH_PENDING) {
++                            /* key-v2: queda pendiente del toque; el LED se queda fijo */
++                            memcpy(otp_pending_frame, otp_frame_rx, sizeof(otp_pending_frame));
++                            otp_touch_pending = true;
++                            otp_touch_pressed = false;
++                            button_wait_start_local(OTP_TOUCH_TIMEOUT_S);
+                         }
+-                        _is_otp = false;
+-                        apdu = apdu_saved;
+                     }
+                     else {
+                         printf("[OTP] Bad CRC!\n");
+@@ -1166,6 +1211,24 @@
+     (void) report_type;
+     (void) buffer;
+     (void) reqlen;
++    if (otp_touch_pending) {
++        /* key-v2: modo asincrono. Mientras se espera, el estado lleva 0x20 y el host sigue
++           preguntando; al pulsar se procesa la trama guardada; si vence o se cancela, estado 0. */
++        if (!otp_touch_pressed) {
++            button_event_t ev = button_local_result();
++            if (ev == BUTTON_EV_PRESSED) {
++                otp_touch_pressed = true;
++            }
++            else if (ev == BUTTON_EV_TIMEOUT || ev == BUTTON_EV_CANCELLED) {
++                otp_touch_clear();
++                status_byte = 0x00;
++            }
++        }
++        if (otp_touch_pressed && otp_run_frame(otp_pending_frame, true) >= 0) {
++            otp_touch_clear();
++            status_byte = 0x00;
++        }
++    }
+     uint16_t send_buffer_size = *get_send_buffer_size(ITF_KEYBOARD);
+     if (send_buffer_size > 0) {
+         uint8_t seq = otp_curr_seq++;

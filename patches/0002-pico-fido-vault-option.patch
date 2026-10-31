@@ -1,0 +1,17 @@
+diff --git a/src/fido/cbor_vendor.c b/src/fido/cbor_vendor.c
+index e0261f4..3c490d3 100644
+--- a/src/fido/cbor_vendor.c
++++ b/src/fido/cbor_vendor.c
+@@ -292,6 +292,12 @@ static int cbor_vendor_generic(uint8_t cmd, const uint8_t *data, size_t len) {
+         }
+     }
+     else if (cmd == CTAP_VENDOR_VAULT) {
++#ifndef PICOKEYS_ENABLE_VAULT
++        /* key-v2: compilado con ENABLE_VAULT=OFF, el vault no se ofrece al host. */
++        if (cmd == CTAP_VENDOR_VAULT) {
++            CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER); /* igual que un comando desconocido */
++        }
++#endif
+         int vault_ctap_error = 0;
+         CborError vault_error = vault_vendor_command(vendorCmd, vendorParam, pinUvAuthParam, pinUvAuthProtocol, raw_vendor_params, raw_vendor_params_len, vault_algorithm, vault_algorithm_present, encoder, &resp_size, &vault_response_handled, &vault_ctap_error);
+         if (vault_ctap_error != 0) {

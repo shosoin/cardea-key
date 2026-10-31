@@ -1,0 +1,28 @@
+diff --git a/src/openpgp/openpgp.c b/src/openpgp/openpgp.c
+index 4eb7a58..ea758b4 100644
+--- a/src/openpgp/openpgp.c
++++ b/src/openpgp/openpgp.c
+@@ -1979,7 +1979,9 @@ static const cmd_t cmds[] = {
+     { INS_SELECT_DATA, cmd_select_data },
+     { INS_GET_NEXT_DATA, cmd_get_next_data },
+     { INS_GET_BULK_DATA, cmd_get_bulk_data },
++#ifdef PICOKEYS_ENABLE_VAULT /* key-v2: opcion ENABLE_VAULT */
+     { INS_VAULT, cmd_openpgp_vault },
++#endif
+     { 0x00, NULL }
+ };
+ 
+diff --git a/src/openpgp/piv.c b/src/openpgp/piv.c
+index 793ba60..74abbe2 100644
+--- a/src/openpgp/piv.c
++++ b/src/openpgp/piv.c
+@@ -682,7 +682,9 @@ static const cmd_t extension_cmds[] = {
+     { INS_RESET, cmd_reset },
+     { INS_ATTESTATION, cmd_attestation },
+     { INS_IMPORT_ASYM, cmd_import_asym },
++#ifdef PICOKEYS_ENABLE_VAULT /* key-v2: opcion ENABLE_VAULT */
+     { INS_VAULT, cmd_piv_vault },
++#endif
+     { 0x00, 0x0 }
+ };
+ 

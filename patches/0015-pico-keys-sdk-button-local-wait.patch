@@ -1,0 +1,61 @@
+diff --git a/src/button.c b/src/button.c
+index 96cf21a..f9656bc 100644
+--- a/src/button.c
++++ b/src/button.c
+@@ -112,6 +112,26 @@ void button_wait_start(void) {
+     button_wait_start_timeout(button_timeout_seconds());
+ }
+ 
++static volatile bool async_button_local = false;
++static volatile button_event_t local_button_result = BUTTON_EV_NONE;
++
++void button_wait_start_local(uint32_t timeout_seconds) {
++    local_button_result = BUTTON_EV_NONE;
++    async_button_local = true;
++    bool previous_force = force_button_wait;
++    force_button_wait = true;
++    button_wait_start_timeout(timeout_seconds);
++    force_button_wait = previous_force;
++}
++
++button_event_t button_local_result(void) {
++    button_event_t r = local_button_result;
++    if (r != BUTTON_EV_NONE) {
++        local_button_result = BUTTON_EV_NONE;
++    }
++    return r;
++}
++
+ void button_wait_start_timeout(uint32_t timeout_seconds) {
+     uint32_t button_timeout = timeout_seconds * 1000;
+     if (button_timeout == 0 && !force_button_wait) {
+@@ -172,7 +192,13 @@ void button_wait_poll(void) {
+     else if (result == BUTTON_EV_CANCELLED) {
+         flag = EV_BUTTON_CANCELLED;
+     }
+-    queue_try_add(&usb_to_card_q, &flag);
++    if (async_button_local) {
++        async_button_local = false;
++        local_button_result = result;
++    }
++    else {
++        queue_try_add(&usb_to_card_q, &flag);
++    }
+     if (result == BUTTON_EV_PRESSED) {
+         signal_emit(SIGNAL_USER_PRESENCE_COMPLETED);
+     }
+diff --git a/src/button.h b/src/button.h
+index f7ca1c9..7520662 100644
+--- a/src/button.h
++++ b/src/button.h
+@@ -45,5 +45,10 @@ extern void button_wait_start_timeout(uint32_t timeout_seconds);
+ extern int (*button_pressed_cb)(uint8_t);
+ 
+ extern bool is_req_button_pending(void);
++/* key-v2: espera asincrona del boton cuyo resultado no va al hilo de la tarjeta sino que se consulta
++   con button_local_result() (BUTTON_EV_NONE mientras se espera). Para rutas que corren en la tarea
++   USB y no pueden bloquear, p. ej. el challenge-response OTP con toque por el teclado HID. */
++extern void button_wait_start_local(uint32_t timeout_seconds);
++extern button_event_t button_local_result(void);
+ 
+ #endif // BUTTON_H

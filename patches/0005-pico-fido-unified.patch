@@ -1,0 +1,114 @@
+diff --git a/src/fido/cbor.c b/src/fido/cbor.c
+index 0a0a48c..439787d 100644
+--- a/src/fido/cbor.c
++++ b/src/fido/cbor.c
+@@ -32,7 +32,11 @@ const bool _btrue = true, _bfalse = false;
+ 
+ int cbor_get_assertion(const uint8_t *data, size_t len, bool next);
+ 
++#ifdef FIDO_AAGUID_BYTES /* key-v2: AAGUID configurable (lista de 16 bytes separados por comas) */
++const uint8_t aaguid[16] = { FIDO_AAGUID_BYTES };
++#else
+ const uint8_t aaguid[16] = { 0x89, 0xFB, 0x94, 0xB7, 0x06, 0xC9, 0x36, 0x73, 0x9B, 0x7E, 0x30, 0x52, 0x6D, 0x96, 0x81, 0x45 }; // First 16 bytes of SHA256("Pico FIDO2")
++#endif
+ 
+ static const uint8_t *volatile cbor_data = NULL;
+ static volatile size_t cbor_len = 0;
+diff --git a/src/fido/cbor_reset.c b/src/fido/cbor_reset.c
+index a52fbbf..65bcd62 100644
+--- a/src/fido/cbor_reset.c
++++ b/src/fido/cbor_reset.c
+@@ -32,6 +32,14 @@
+ static bool fido_reset_should_clear(uint16_t fid) {
+     uint8_t prefix = (uint8_t)(fid >> 8);
+ 
++#ifdef KEYV2_UNIFIED
++    /* key-v2: ficheros del SDK compartidos (metadatos de claves de OpenPGP/PIV, config
++       del hardware, MKEK en flash): un reset de FIDO no los toca. */
++    if (fid == EF_META || fid == EF_PHY || fid == EF_MKEK) {
++        return false;
++    }
++#endif
++
+     switch (fid) {
+         case EF_KEY_DEV:
+         case EF_KEY_DEV_ENC:
+@@ -55,7 +63,13 @@ static bool fido_reset_should_clear(uint16_t fid) {
+     }
+ 
+     // FIDO vault, credential, and resident-object records use these dynamic FID prefixes.
++#ifdef KEYV2_UNIFIED
++    /* key-v2: el vault del SDK (0xC4-0xC9) es compartido con OpenPGP/PIV; lo de FIDO
++       se borra con fido_vault_clear() en fido_reset_storage(). */
++    return prefix == 0xcf || (prefix >= 0xd0 && prefix <= 0xdc) || (prefix >= 0xe0 && prefix <= 0xe3);
++#else
+     return (prefix >= 0xc4 && prefix <= 0xc9) || prefix == 0xcf || (prefix >= 0xd0 && prefix <= 0xdc) || (prefix >= 0xe0 && prefix <= 0xe3);
++#endif
+ }
+ 
+ typedef struct fido_reset_context {
+@@ -80,11 +94,20 @@ static bool fido_reset_dynamic_file(file_t *file, void *ctx) {
+     return true;
+ }
+ 
++#ifdef KEYV2_UNIFIED
++extern int fido_vault_clear(void);
++#endif
++
+ static int fido_reset_storage(void) {
+     fido_reset_context_t context = {
+         .ret = PICOKEYS_OK,
+         .metadata_failed = false
+     };
++#ifdef KEYV2_UNIFIED
++    if (fido_vault_clear() != PICOKEYS_OK) {
++        return PICOKEYS_EXEC_ERROR;
++    }
++#endif
+     file_for_each_dynamic(fido_reset_dynamic_file, &context);
+     if (context.ret != PICOKEYS_OK) {
+         return context.ret;
+diff --git a/src/fido/fido_vault.c b/src/fido/fido_vault.c
+index 8b08f67..de6c82b 100644
+--- a/src/fido/fido_vault.c
++++ b/src/fido/fido_vault.c
+@@ -53,6 +53,18 @@ static int vault_sdk_init(void) {
+     return picokeys_vault_init(&primary, NULL, ef_vault_key, file_search_by_fid(EF_VAULT_LABEL, NULL, SPECIFY_EF));
+ }
+ 
++#ifdef KEYV2_UNIFIED
++/* key-v2: borra solo los registros de FIDO del vault compartido del SDK (reset de FIDO). */
++int fido_vault_clear(void);
++int fido_vault_clear(void) {
++    if (vault_sdk_init() != PICOKEYS_OK) {
++        return PICOKEYS_EXEC_ERROR;
++    }
++    int ret = picokeys_vault_delete_kvault(VAULT_APP_ID);
++    return ret == PICOKEYS_ERR_FILE_NOT_FOUND ? PICOKEYS_OK : ret;
++}
++#endif
++
+ static const uint8_t vault_blob_magic[] = { 'P', 'K', 'V', 1 };
+ 
+ static int vault_pin_auth(uint8_t protocol, const CborByteString *auth, const uint8_t *raw_params, size_t raw_params_len, uint64_t subcommand) {
+diff --git a/src/fido/files.c b/src/fido/files.c
+index 5f4a8bf..b4bab41 100644
+--- a/src/fido/files.c
++++ b/src/fido/files.c
+@@ -17,6 +17,8 @@
+ 
+ #include "files.h"
+ 
++/* key-v2: en el firmware unificado la tabla vive en la de OpenPGP (firmware/src/fido_file_entries.inc). */
++#ifndef KEYV2_UNIFIED
+ file_entry_t file_entries[] = {
+     { .fid = 0x3f00, .parent = 0xff, .name = NULL, .type = FILE_TYPE_DF, .data = NULL, .ef_structure = 0, .acl = { 0 } }, // MF
+     { .fid = EF_KEY_DEV, .parent = 0, .name = NULL, .type = FILE_TYPE_INTERNAL_EF | FILE_DATA_FLASH, .data = NULL, .ef_structure = FILE_EF_TRANSPARENT, .acl = ACL_NONE }, // Device Key
+@@ -41,6 +43,7 @@ file_entry_t file_entries[] = {
+ 
+ const file_t *MF = &file_entries[0].file;
+ const file_entry_t *file_last = &file_entries[sizeof(file_entries) / sizeof(file_entry_t) - 1];
++#endif
+ file_t *ef_keydev = NULL;
+ file_t *ef_certdev = NULL;
+ file_t *ef_counter = NULL;

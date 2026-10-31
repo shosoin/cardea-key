@@ -1,0 +1,16 @@
+--- a/cmake/version.cmake
++++ b/cmake/version.cmake
+@@ -63,7 +63,12 @@
+ endmacro()
+ 
+ macro(SET_BUILD_NUMBER SOURCE_DIR)
+-    execute_process(COMMAND git -c "safe.directory=${SOURCE_DIR}" rev-list --count HEAD WORKING_DIRECTORY "${SOURCE_DIR}" OUTPUT_VARIABLE PICO_BUILD_NUMBER OUTPUT_STRIP_TRAILING_WHITESPACE)
++    execute_process(COMMAND git -c "safe.directory=${SOURCE_DIR}" rev-list --count HEAD WORKING_DIRECTORY "${SOURCE_DIR}" OUTPUT_VARIABLE PICO_BUILD_NUMBER OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
++    # key-v2: sin historial de git (descarga en ZIP, repo sin commits) el numero salia vacio y la
++    # compilacion fallaba en rescue.c (PICO_BUILD_NUMBER=). Se usa 0.
++    if(NOT PICO_BUILD_NUMBER MATCHES "^[0-9]+$")
++        set(PICO_BUILD_NUMBER 0)
++    endif()
+     message(STATUS "Build number:\t\t ${PICO_BUILD_NUMBER}")
+     add_compile_definitions(PICO_BUILD_NUMBER=${PICO_BUILD_NUMBER})
+ endmacro()

@@ -1,0 +1,39 @@
+--- a/src/fido/cbor_vendor.c
++++ b/src/fido/cbor_vendor.c
+@@ -149,6 +149,36 @@
+             if (vendorParam.present == false) {
+                 CBOR_ERROR(CTAP2_ERR_MISSING_PARAMETER);
+             }
++            /* key-v2: la restauracion sustituye la clave maestra cifrada y borra la actual, es
++             * decir, destruye todas las credenciales. Upstream leia pinUvAuthParam pero no lo
++             * comprobaba: bastaba pulsar el boton. Ahora, con PIN puesto, exige un token de PIN
++             * con permiso acfg (mismo formato que el vault: 32 x 0xFF | 0x0D | subcomando |
++             * parametros CBOR), y que el dato tenga el tamano de una clave cifrada
++             * (nonce 12 + clave 32 + etiqueta 16). Sin PIN, como un reset: solo el boton. */
++            if (vendorParam.len != 12 + sizeof(keydev_dec) + 16) {
++                CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
++            }
++            if (file_has_data(ef_pin)) {
++                if (pinUvAuthParam.present == false) {
++                    CBOR_ERROR(CTAP2_ERR_PUAT_REQUIRED);
++                }
++                if ((pinUvAuthProtocol != 1 && pinUvAuthProtocol != 2) || pinUvAuthParam.len != (pinUvAuthProtocol == 1 ? 16u : 32u) || raw_vendor_params == NULL || raw_vendor_params_len > CTAP_MAX_CBOR_PAYLOAD - 34u) {
++                    CBOR_ERROR(CTAP2_ERR_PIN_AUTH_INVALID);
++                }
++                uint8_t *payload = calloc(1, 34u + raw_vendor_params_len);
++                if (payload == NULL) {
++                    CBOR_ERROR(CTAP2_ERR_PROCESSING);
++                }
++                memset(payload, 0xff, 32);
++                payload[32] = 0x0d;
++                payload[33] = (uint8_t)vendorCmd;
++                memcpy(payload + 34, raw_vendor_params, raw_vendor_params_len);
++                int vret = verify((uint8_t)pinUvAuthProtocol, paut.data, payload, (uint16_t)(34u + raw_vendor_params_len), pinUvAuthParam.data);
++                free(payload);
++                if (vret != 0 || !paut.in_use || !(paut.permissions & CTAP_PERMISSION_ACFG)) {
++                    CBOR_ERROR(CTAP2_ERR_PIN_AUTH_INVALID);
++                }
++            }
+             if (check_user_presence() == false) {
+                 CBOR_ERROR(CTAP2_ERR_OPERATION_DENIED);
+             }

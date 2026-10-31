@@ -1,0 +1,25 @@
+diff --git a/src/usb/usb.c b/src/usb/usb.c
+index 91fdf11..4435ec3 100644
+--- a/src/usb/usb.c
++++ b/src/usb/usb.c
+@@ -24,7 +24,19 @@
+ #include "pico/bootrom.h"
+ #include "pico/multicore.h"
+ #include "hardware/sync.h"
+-#define multicore_launch_func_core1(a) multicore_launch_core1((void (*) (void))a)
++/*
++ * key-v2: el hilo de la tarjeta (nucleo 1) se lanza con su propia pila en la RAM principal. Por
++ * defecto el pico-sdk la pone en SCRATCH_X (2 KB), justo debajo del hueco libre de SCRATCH_Y que
++ * hay bajo la pila del nucleo 0: si el nucleo 0 pasaba de 4 KB (p. ej. un challenge-response OTP
++ * por el teclado HID descifra el slot dentro del callback USB) pisaba la pila del nucleo 1 y el
++ * hilo de la tarjeta se corrompia (la CCID dejaba de responder). Con esto el nucleo 0 dispone de
++ * SCRATCH_Y + SCRATCH_X (8 KB) y el nucleo 1 de KEYV2_CORE1_STACK_SIZE.
++ */
++#ifndef KEYV2_CORE1_STACK_SIZE
++#define KEYV2_CORE1_STACK_SIZE (16u * 1024u)
++#endif
++static uint32_t core1_stack[KEYV2_CORE1_STACK_SIZE / sizeof(uint32_t)] __attribute__((aligned(8)));
++#define multicore_launch_func_core1(a) multicore_launch_core1_with_stack((void (*) (void))a, core1_stack, sizeof(core1_stack))
+ #endif
+ #include "apdu.h"
+ #ifndef ENABLE_EMULATION

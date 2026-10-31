@@ -1,0 +1,59 @@
+--- a/src/fido/cbor_get_assertion.c
++++ b/src/fido/cbor_get_assertion.c
+@@ -529,9 +529,13 @@
+                 }
+             }
+         }
++        /* key-v2: con FORCE_BUTTON_WAIT, salvo que la credencial lo desactive expresamente
++           (authenticatorConfig), toda firma exige el boton: antes salia UP=1 sin pulsar. */
+         bool require_button = numberOfCredentials > 0 && (creds[0].require_button != NULL
+             ? *creds[0].require_button
+-#ifndef ENABLE_EMULATION
++#if defined(FORCE_BUTTON_WAIT) && !defined(ENABLE_EMULATION)
++            : true
++#elif !defined(ENABLE_EMULATION)
+             : button_timeout_seconds() != 0
+ #else
+             : false
+@@ -545,8 +549,12 @@
+                         CBOR_ERROR(CTAP2_ERR_OPERATION_DENIED);
+                     }
+ #ifndef ENABLE_EMULATION
++#ifdef FORCE_BUTTON_WAIT
++                    button_pressed = require_button;
++#else
+                     button_pressed = require_button && button_timeout_seconds() != 0;
+ #endif
++#endif
+                 }
+             }
+             else {
+@@ -555,8 +563,12 @@
+                         CBOR_ERROR(CTAP2_ERR_OPERATION_DENIED);
+                     }
+ #ifndef ENABLE_EMULATION
++#ifdef FORCE_BUTTON_WAIT
++                    button_pressed = require_button;
++#else
+                     button_pressed = require_button && button_timeout_seconds() != 0;
+ #endif
++#endif
+                 }
+             }
+             flags |= FIDO2_AUT_FLAG_UP;
+--- a/src/fido/fido.c
++++ b/src/fido/fido.c
+@@ -618,6 +618,13 @@
+ }
+ 
+ bool check_user_presence_for_credential(bool require_button) {
++#ifdef FORCE_BUTTON_WAIT
++    /* key-v2: con FORCE_BUTTON_WAIT, una credencial que exige boton lo espera de verdad. Sin
++       esto, con el tiempo de boton por defecto (0) getAssertion devolvia UP=1 sin pulsacion. */
++    if (require_button) {
++        return check_user_presence_internal(button_timeout_seconds(), true);
++    }
++#endif
+     uint32_t timeout_seconds = require_button ? button_timeout_seconds() : 0;
+     return check_user_presence_internal(timeout_seconds, false);
+ }

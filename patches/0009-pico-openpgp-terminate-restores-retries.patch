@@ -1,0 +1,28 @@
+--- a/src/openpgp/cmd_terminate_df.c
++++ b/src/openpgp/cmd_terminate_df.c
+@@ -118,6 +118,25 @@
+         }
+     }
+ 
++    /*
++     * key-v2: EF_PW_PRIV se conserva porque lo comparte PIV (bytes 7-8), pero sus contadores de
++     * OpenPGP (bytes 4-6: PW1, RC, PW3) se quedaban como estaban. Tras el bloqueo de PINs que
++     * precede a un reset de fábrica valían 0 y la tarjeta OpenPGP quedaba bloqueada para siempre.
++     * Se reponen a los valores de fábrica (3, 0, 3) sin tocar los de PIV.
++     */
++    if (context.value == PICOKEYS_OK) {
++        file_t *pw_status = file_search_by_fid(EF_PW_PRIV, NULL, SPECIFY_EF);
++        if (pw_status && file_has_data(pw_status) && file_get_size(pw_status) >= 7 && file_get_size(pw_status) <= 16) {
++            uint8_t status[16];
++            uint16_t status_len = file_get_size(pw_status);
++            memcpy(status, file_get_data(pw_status), status_len);
++            status[4] = 3;
++            status[5] = 0;
++            status[6] = 3;
++            file_put_data(pw_status, CONST_BYTE_ARRAY(status, status_len));
++        }
++    }
++
+     flash_commit();
+     file_initialize_flash(false);
+     scan_files_openpgp();

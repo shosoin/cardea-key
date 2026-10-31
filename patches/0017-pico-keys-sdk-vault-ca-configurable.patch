@@ -1,0 +1,27 @@
+diff --git a/src/vault.c b/src/vault.c
+index 7d1e3ce..1d64d66 100644
+--- a/src/vault.c
++++ b/src/vault.c
+@@ -44,6 +44,14 @@
+ static const uint8_t vault_id_domain[] = "PicoKeys Vault ID v1";
+ static const uint8_t vault_enroll_info[] = "PicoKeys Vault enrollment v1";
+ static const uint8_t vault_enrollment_hpke_info[] = "PicoKeys Vault enrollment v2";
++/*
++ * key-v2: CA raiz del vault configurable. Con PICOKEYS_VAULT_CA_INC se incluye un fichero que define
++ * picokeys_vault_ca_der[] (el firmware Cardea Key lo genera desde el certificado de firmware/certs; cualquiera
++ * puede compilar con su propia CA). Sin definirlo, la CA de PicoKeys de upstream.
++ */
++#ifdef PICOKEYS_VAULT_CA_INC
++#include PICOKEYS_VAULT_CA_INC
++#else
+ static const uint8_t picokeys_vault_ca_der[] = {
+     0x30, 0x82, 0x01, 0xEB, 0x30, 0x82, 0x01, 0x6B, 0xA0, 0x03, 0x02, 0x01,
+     0x02, 0x02, 0x14, 0x2B, 0x37, 0x6A, 0xC8, 0x98, 0x74, 0xE5, 0x0E, 0x80,
+@@ -88,6 +96,7 @@ static const uint8_t picokeys_vault_ca_der[] = {
+     0xD6, 0x11, 0x05, 0x7A, 0xEF, 0x38, 0x97, 0x05, 0x96, 0x13, 0xC6, 0x95,
+     0x01, 0x3A, 0x00,
+ };
++#endif
+ static uint8_t vault_enroll_private[PICOKEYS_VAULT_X448_BYTES];
+ static uint8_t vault_enroll_public[PICOKEYS_VAULT_X448_BYTES];
+ static uint8_t vault_enroll_challenge[PICOKEYS_VAULT_ENROLL_CHALLENGE_BYTES];

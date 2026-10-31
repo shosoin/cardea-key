@@ -1,0 +1,43 @@
+# --- Upstream y artefactos: se rehacen con scripts/fetch-sources.sh y CMake ---
+/third_party/
+/build/
+/out/
+/tools/
+*.uf2
+*.elf
+*.bin
+*.hex
+*.dis
+*.map
+
+# --- Datos de la placa del banco: identifican el chip (chipid = semilla de la clave base sin OTP) ---
+logs/
+*.otp
+*otp-dump*
+*.log
+
+# --- Secretos y claves de firma: nunca ---
+*.pem
+*.key
+*.p12
+*.pfx
+*.der
+*.gpg
+*.asc
+secrets/
+.env
+*.env
+
+# --- Herramientas locales y editores ---
+.claude/
+*.jsonl
+.vscode/
+.idea/
+*.swp
+
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- Notas de trabajo locales ---
+CLAUDE.md

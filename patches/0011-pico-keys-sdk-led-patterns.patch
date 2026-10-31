@@ -1,0 +1,59 @@
+diff --git a/src/led/led.c b/src/led/led.c
+index 145cafb..2c33c2e 100644
+--- a/src/led/led.c
++++ b/src/led/led.c
+@@ -121,6 +121,18 @@ void led_blinking_task(void) {
+     if (phy_data.opts & PHY_OPT_LED_STEADY) {
+         progress = 1;
+     }
++#ifdef KEYV2_LED_PATTERNS
++    /* key-v2: sin fundidos. Con el driver de un GPIO (Pico) el fundido convertia cualquier patron
++       en un parpadeo al 50 % (encendido de la mitad de una fase a la mitad de la otra) y "esperando
++       boton" no se distinguia del reposo. Tiempo de apagado 0 = encendido fijo. */
++    {
++        bool on = led_state || led_off == 0;
++#ifdef PICO_DEFAULT_LED_PIN_INVERTED
++        on = !on;
++#endif
++        progress = on ? 1.0f : 0.0f;
++    }
++#endif
+ 
+     // limit the frequency of LED status updates
+     if (now - last_led_update_ms > 2) {
+diff --git a/src/led/led.h b/src/led/led.h
+index 220ebd5..3536f97 100644
+--- a/src/led/led.h
++++ b/src/led/led.h
+@@ -50,6 +50,23 @@ enum {
+ // steady on
+ #define LED_ON_NO_BLINK     ((1000 << LED_ON_SHIFT) | (0 << LED_OFF_SHIFT))
+ 
++#ifdef KEYV2_LED_PATTERNS
++/*
++ * key-v2: patrones pensados para un LED de un solo color (Pico 2) y sin fundidos (ver led.c):
++ * reposo = destello corto cada 3 s, procesando = parpadeo rapido, ESPERANDO BOTON = encendido
++ * fijo (inconfundible), suspendida = destello cada 6 s, sin host = 0,5/0,5 s.
++ */
++enum  {
++    MODE_NOT_MOUNTED = (MAX_BTNESS << LED_BTNESS_SHIFT) | (LED_COLOR_RED << LED_COLOR_SHIFT) | (500 << LED_ON_SHIFT) | (500 << LED_OFF_SHIFT),
++    MODE_MOUNTED     = (MAX_BTNESS << LED_BTNESS_SHIFT) | (LED_COLOR_GREEN << LED_COLOR_SHIFT) | (60 << LED_ON_SHIFT) | (2940 << LED_OFF_SHIFT),
++    MODE_SUSPENDED   = (MAX_BTNESS << LED_BTNESS_SHIFT) | (LED_COLOR_BLUE << LED_COLOR_SHIFT) | (60 << LED_ON_SHIFT) | (4000 << LED_OFF_SHIFT),
++    MODE_PROCESSING  = (MAX_BTNESS << LED_BTNESS_SHIFT) | (LED_COLOR_GREEN << LED_COLOR_SHIFT) | (50 << LED_ON_SHIFT) | (50 << LED_OFF_SHIFT),
++    MODE_BUTTON      = (MAX_BTNESS << LED_BTNESS_SHIFT) | (LED_COLOR_YELLOW << LED_COLOR_SHIFT) | (1000 << LED_ON_SHIFT) | (0 << LED_OFF_SHIFT),
++
++    MODE_ALWAYS_ON   = UINT32_MAX,
++    MODE_ALWAYS_OFF  = 0
++};
++#else
+ enum  {
+     MODE_NOT_MOUNTED = (MAX_BTNESS << LED_BTNESS_SHIFT) | (LED_COLOR_RED << LED_COLOR_SHIFT) | (500 << LED_ON_SHIFT) | (500 << LED_OFF_SHIFT),
+     MODE_MOUNTED     = (MAX_BTNESS << LED_BTNESS_SHIFT) | (LED_COLOR_GREEN << LED_COLOR_SHIFT) | (500 << LED_ON_SHIFT) | (500 << LED_OFF_SHIFT),
+@@ -60,6 +77,7 @@ enum  {
+     MODE_ALWAYS_ON   = UINT32_MAX,
+     MODE_ALWAYS_OFF  = 0
+ };
++#endif
+ 
+ extern void led_set_mode(uint32_t mode);
+ extern uint32_t led_get_mode(void);

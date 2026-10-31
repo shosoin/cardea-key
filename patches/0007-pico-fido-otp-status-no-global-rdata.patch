@@ -1,0 +1,74 @@
+diff --git a/src/fido/otp.c b/src/fido/otp.c
+index 8a8a9ec..8fb63b0 100644
+--- a/src/fido/otp.c
++++ b/src/fido/otp.c
+@@ -622,19 +622,26 @@ static uint16_t otp_status_ext(void) {
+     return SW_OK();
+ }
+ 
+-static uint16_t otp_status(bool is_otp) {
++/*
++ * key-v2: escribe el estado OTP en 'out' y devuelve su longitud sin tocar los globales de la
++ * respuesta APDU. otp_hid_get_report_cb() se ejecuta en el nucleo USB mientras el hilo de la
++ * tarjeta (otro nucleo) puede estar construyendo una respuesta CTAP: si el callback reapuntaba
++ * el buffer de respuesta global al del endpoint, esa respuesta se perdia (p. ej. un timeout
++ * del boton llegaba como CTAP2_OK con datos a cero).
++ */
++static uint16_t otp_status_fill(uint8_t *out, bool is_otp) {
+     if (scanned == false) {
+         scan_all();
+         scanned = true;
+     }
+-    res_APDU_size = 0;
++    uint16_t n = 0;
+     if (is_otp) {
+-        res_APDU_size++;
++        n++;
+     }
+-    res_APDU[res_APDU_size++] = PICO_FIDO_VERSION_MAJOR;
+-    res_APDU[res_APDU_size++] = PICO_FIDO_VERSION_MINOR;
+-    res_APDU[res_APDU_size++] = 0;
+-    res_APDU[res_APDU_size++] = config_seq;
++    out[n++] = PICO_FIDO_VERSION_MAJOR;
++    out[n++] = PICO_FIDO_VERSION_MINOR;
++    out[n++] = 0;
++    out[n++] = config_seq;
+     uint8_t opts = 0;
+     if (otp_slot_has_data(EF_OTP_SLOT1)) {
+         uint8_t data[OTP_SLOT_PLAIN_MAX] = { 0 };
+@@ -660,16 +667,21 @@ static uint16_t otp_status(bool is_otp) {
+         }
+         mbedtls_platform_zeroize(data, sizeof(data));
+     }
+-    res_APDU[res_APDU_size++] = opts;
+-    res_APDU[res_APDU_size++] = 0;
+-    res_APDU[res_APDU_size++] = status_byte;
++    out[n++] = opts;
++    out[n++] = 0;
++    out[n++] = status_byte;
++    return n;
++}
++
++static uint16_t otp_status(bool is_otp) {
++    uint16_t n = otp_status_fill(res_APDU, is_otp);
+     if (is_otp) {
+         res_APDU_size = 0;
+     }
+     else {
++        res_APDU_size = n;
+         apdu.ne = res_APDU_size;
+     }
+-
+     return SW_OK();
+ }
+ 
+@@ -1155,8 +1167,7 @@ static uint16_t otp_hid_get_report_cb(uint8_t itf,
+         otp_curr_seq = otp_exp_seq = 0;
+     }
+     else {
+-        res_APDU = buffer;
+-        otp_status(true);
++        otp_status_fill(buffer, true); /* key-v2: sin reapuntar res_APDU (ver otp_status_fill) */
+         DEBUG_DATA(buffer, 8);
+     }
+ 
