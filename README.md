@@ -73,6 +73,7 @@ Main build options (`-D<option>=ON|OFF`):
 | `ENABLE_VAULT` | ON | Passkey backups (inactive until each key is enrolled). OFF removes the code. |
 | `KEYV2_VAULT_CA_CERT` | Cardea Key Vault CA | Root certificate (PEM) of the vault CA. Point it at your own CA. |
 | `FORCE_BUTTON_WAIT` | ON | Require a real button press for user presence. |
+| `CARDEA_SE` | `soft` | Secure-element backend. `soft`: no chip, same security and data as v0.1.0. `se05x` (NXP SE051): in progress, phase 1. |
 | `ENABLE_OATH_APP`, `ENABLE_OTP_APP` | ON | OATH and OTP-slot applications. |
 | `USB_VID`, `USB_PID` | `0x1209`, `0x0001` | USB IDs (see below). |
 

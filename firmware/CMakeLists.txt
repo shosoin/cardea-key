@@ -53,6 +53,18 @@ configure_bool_option(FORCE_BUTTON_WAIT FORCE_BUTTON_WAIT "User presence button:
 option(KEYV2_LED_PATTERNS "LED: patrones key-v2 sin fundidos (reposo=destello, botón=fijo)" ON)
 configure_bool_option(KEYV2_LED_PATTERNS KEYV2_LED_PATTERNS "LED patterns: \t\t key-v2 (button = steady on)" "LED patterns: \t\t upstream")
 option(ENABLE_ADMINLESS_MODE "OpenPGP: Gnuk-compatible admin-less PIN mode (upstream default ON)" ON)
+# Secure element (fase 1, docs: src/se/cardea_se.h). soft = sin chip, misma seguridad y mismos
+# datos que la v0.1.0; se05x = NXP SE051 por I2C (pendiente).
+set(CARDEA_SE "soft" CACHE STRING "Secure element backend: soft | se05x")
+set_property(CACHE CARDEA_SE PROPERTY STRINGS soft se05x)
+if(CARDEA_SE STREQUAL "soft")
+    message(STATUS "Secure element: \t\t soft (no chip; root key = MKEK, as v0.1.0)")
+elseif(CARDEA_SE STREQUAL "se05x")
+    message(FATAL_ERROR "CARDEA_SE=se05x: backend not implemented yet (issues #4, #5, #6)")
+else()
+    message(FATAL_ERROR "CARDEA_SE must be soft or se05x, not '${CARDEA_SE}'")
+endif()
+add_compile_definitions(PICOKEYS_SE_HOOKS=1)
 
 # Definiciones extra para builds de diagnóstico (p. ej. -DKEYV2_EXTRA_DEFINITIONS="KEYV2_DEBUG_BUTTON=1")
 set(KEYV2_EXTRA_DEFINITIONS "" CACHE STRING "Definiciones de preprocesador extra (lista ;)")
@@ -145,7 +157,7 @@ set(PGP_SOURCES
 )
 list(TRANSFORM PGP_SOURCES PREPEND ${PGP_DIR}/)
 
-set(GLUE_SOURCES ${CMAKE_CURRENT_LIST_DIR}/src/keyv2_glue.c)
+set(GLUE_SOURCES ${CMAKE_CURRENT_LIST_DIR}/src/keyv2_glue.c ${CMAKE_CURRENT_LIST_DIR}/src/se/se_${CARDEA_SE}.c)
 
 # Cada app con sus propias cabeceras: las dos tienen files.h, version.h, management.h,
 # object_provider.h... con el mismo nombre y distinto contenido.
@@ -158,7 +170,7 @@ set_source_files_properties(${GLUE_SOURCES} PROPERTIES INCLUDE_DIRECTORIES "${GE
 
 set(SOURCES ${PICOKEYS_SOURCES} ${FIDO_SOURCES} ${PGP_SOURCES} ${GLUE_SOURCES})
 target_sources(cardea_key PUBLIC ${SOURCES})
-target_include_directories(cardea_key PUBLIC ${INCLUDES} ${GEN_DIR})
+target_include_directories(cardea_key PUBLIC ${INCLUDES} ${GEN_DIR} ${CMAKE_CURRENT_LIST_DIR}/src/se)
 target_compile_options(cardea_key PRIVATE -Wall)
 
 picokeys_apply_strict_flags(

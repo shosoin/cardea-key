@@ -29,6 +29,7 @@ is built on its own without `KEYV2_UNIFIED`. Code comments inside the patches ar
 | 0019 | pico-fido | Master-key restore (`CTAP_VENDOR_BACKUP` 0x02): upstream parsed `pinUvAuthParam` but never checked it, so a button press was enough to replace the master key and destroy every credential. With a PIN set it now requires a PIN token with the `acfg` permission and the exact blob size (60 B); without a PIN, the button only, like a reset | **upstream** |
 | 0020 | pico-fido | With `FORCE_BUTTON_WAIT`, `getAssertion` waits for the button. Before, with the default button timeout (0), it signed with UP=1 without a press. Only a credential with the button explicitly disabled (authenticatorConfig) skips it | **upstream** |
 | 0021 | pico-keys-sdk | Without git history (ZIP download, repository with no commits) the build number was empty and the build failed in `rescue.c`; it now defaults to 0 | **upstream** |
+| 0022 | pico-keys-sdk | Phase 1: with `PICOKEYS_SE_HOOKS`, `derive_kbase()` asks the secure-element interface (`firmware/src/se/cardea_se.h`) for the root-key derivation, and `otp_init()` starts the backend. The `soft` backend produces the same bytes as before (no migration). Without the define, the SDK is unchanged | Cardea |
 
 ## Regenerating
 

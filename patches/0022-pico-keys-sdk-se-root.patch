@@ -1,0 +1,62 @@
+--- a/src/crypto_utils.c
++++ b/src/crypto_utils.c
+@@ -26,6 +26,9 @@
+ #include "crypto_utils.h"
+ #include "otp.h"
+ #include "random.h"
++#ifdef PICOKEYS_SE_HOOKS
++#include "cardea_se.h"
++#endif
+ 
+ static const mbedtls_md_info_t *SHA256(void) {
+     return mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+@@ -33,10 +36,25 @@
+ 
+ void derive_kbase(uint8_t kbase[32]) {
+     const uint8_t nootp_salt[] = "NO-OTP";
++#ifdef PICOKEYS_SE_HOOKS
++    /* key-v2: la clave raiz vive en el secure element (backend "soft": la MKEK de siempre, mismos
++     * bytes). Misma HKDF: sal = hash del serie, info = "DEVICE/ROOT" con su NUL (12 bytes). */
++    if (cardea_se_root_available() &&
++        cardea_se_root_kdf(pico_serial_hash, sizeof(pico_serial_hash), (const uint8_t *)"DEVICE/ROOT", 12, kbase, 32) == 0) {
++        return;
++    }
++    if (cardea_se_root_available()) {
++        /* Hay raiz pero el SE ha fallado: no se cae a la derivacion sin raiz, que daria otra kbase. */
++        mbedtls_platform_zeroize(kbase, 32);
++        return;
++    }
++#else
+     if (otp_key_1) {
+         mbedtls_hkdf(SHA256(), pico_serial_hash, sizeof(pico_serial_hash), otp_key_1, 32, (const uint8_t *)"DEVICE/ROOT", 12, kbase, 32);
+     }
+-    else {
++    else
++#endif
++    {
+         mbedtls_hkdf(SHA256(), nootp_salt, sizeof(nootp_salt)-1, pico_serial_hash, sizeof(pico_serial_hash), (const uint8_t *)"DEVICE/ROOT", 12, kbase, 32);
+     }
+ }
+--- a/src/otp/otp.c
++++ b/src/otp/otp.c
+@@ -25,6 +25,9 @@
+ #include "flash.h"
+ #include "random.h"
+ #include "mbedtls/platform_util.h"
++#ifdef PICOKEYS_SE_HOOKS
++#include "cardea_se.h"
++#endif
+ 
+ const uint8_t *otp_key_1 = NULL;
+ const uint8_t *otp_key_2 = NULL;
+@@ -77,4 +80,10 @@
+         otp_mkek_from_flash();
+     }
+ #endif
++#ifdef PICOKEYS_SE_HOOKS
++    /* key-v2: arranca el secure element en cuanto la MKEK esta cargada. */
++    if (cardea_se_init() != 0) {
++        printf("SE: init failed\n");
++    }
++#endif
+ }
