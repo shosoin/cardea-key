@@ -41,3 +41,6 @@ __pycache__/
 
 # --- Notas de trabajo locales ---
 CLAUDE.md
+
+# --- Firmwares listos para grabar (carpeta local, nunca se versiona) ---
+/firmwares/

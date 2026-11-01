@@ -20,7 +20,7 @@ combines in a single firmware what usually needs several keys:
 Website: <https://cardeakey.org>
 
 > **Status: prototype, not audited.** Phase 0 (one unified firmware, tested on a bare Pico 2) is
-> complete and released as **v0.1.0**. Do not rely on it as your only key yet. Next phases add an external secure element
+> complete and released as **v0.1.1** (v0.1.0 plus a FIDO2 PIN fix). Do not rely on it as your only key yet. Next phases add an external secure element
 > (NXP SE051) for the PIN and root keys, and a fingerprint sensor. See [Roadmap](#roadmap).
 
 ## How it is built

@@ -30,6 +30,7 @@ is built on its own without `KEYV2_UNIFIED`. Code comments inside the patches ar
 | 0020 | pico-fido | With `FORCE_BUTTON_WAIT`, `getAssertion` waits for the button. Before, with the default button timeout (0), it signed with UP=1 without a press. Only a credential with the button explicitly disabled (authenticatorConfig) skips it | **upstream** |
 | 0021 | pico-keys-sdk | Without git history (ZIP download, repository with no commits) the build number was empty and the build failed in `rescue.c`; it now defaults to 0 | **upstream** |
 | 0022 | pico-keys-sdk | Phase 1: with `PICOKEYS_SE_HOOKS`, `derive_kbase()` asks the secure-element interface (`firmware/src/se/cardea_se.h`) for the root-key derivation, and `otp_init()` starts the backend. The `soft` backend produces the same bytes as before (no migration). Without the define, the SDK is unchanged | Cardea |
+| 0025 | pico-fido | The "3 wrong PINs per power-up" lock could be lifted without a power cycle: every `CTAPHID_INIT` (any client sends it when it opens the key) calls `init_fido()`, which cleared it, and a correct PIN only checked that RAM flag. Now only a power-up, a correct PIN or a reset lift it, and `getPinToken` refuses the PIN while it lasts without spending a retry. Reported privately (GHSA-r8qh-fj4q-7xjp) | **upstream** |
 
 ## Regenerating
 
