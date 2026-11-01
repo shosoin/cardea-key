@@ -1,9 +1,7 @@
-diff --git a/src/fido/cbor_client_pin.c b/src/fido/cbor_client_pin.c
-index 0351fa9..71e772a 100644
 --- a/src/fido/cbor_client_pin.c
 +++ b/src/fido/cbor_client_pin.c
-@@ -802,6 +802,10 @@ int cbor_client_pin(const uint8_t *data, size_t len) {
-         if ((*file_get_data(ef_pin) & PIN_RETRY_COUNT_MASK) == 0) {
+@@ -982,6 +982,10 @@
+         if (retries_left == 0) {
              CBOR_ERROR(CTAP2_ERR_PIN_BLOCKED);
          }
 +        if (needs_power_cycle) {
@@ -13,11 +11,9 @@ index 0351fa9..71e772a 100644
          if (mbedtls_mpi_read_binary(&hkey.ctx.mbed_ecdh.Qp.X, kax.data, kax.len) != 0) {
              CBOR_ERROR(CTAP1_ERR_INVALID_PARAMETER);
          }
-diff --git a/src/fido/cbor_reset.c b/src/fido/cbor_reset.c
-index 65bcd62..d90e1d4 100644
 --- a/src/fido/cbor_reset.c
 +++ b/src/fido/cbor_reset.c
-@@ -132,6 +132,8 @@ static int fido_reset_storage(void) {
+@@ -141,6 +141,8 @@
      return context.metadata_failed ? PICOKEYS_EXEC_ERROR : PICOKEYS_OK;
  }
  
@@ -26,7 +22,7 @@ index 65bcd62..d90e1d4 100644
  int cbor_reset(void) {
  #ifndef ENABLE_EMULATION
  #if defined(ENABLE_POWER_ON_RESET) && ENABLE_POWER_ON_RESET == 1
-@@ -150,6 +152,7 @@ int cbor_reset(void) {
+@@ -159,6 +161,7 @@
      if (fido_reset_storage() != PICOKEYS_OK) {
          return CTAP2_ERR_PROCESSING;
      }
@@ -34,11 +30,9 @@ index 65bcd62..d90e1d4 100644
      init_fido();
  #ifdef DEFAULT_MCUV_NOT_REQUIRED
      set_opts(get_opts() | FIDO2_OPT_MCUV_NOTRQD);
-diff --git a/src/fido/fido.c b/src/fido/fido.c
-index c3aef81..45d92c4 100644
 --- a/src/fido/fido.c
 +++ b/src/fido/fido.c
-@@ -532,7 +532,9 @@ void init_fido(void) {
+@@ -532,7 +532,9 @@
  #ifdef ENABLE_OTP_APP
      init_otp();
  #endif

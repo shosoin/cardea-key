@@ -43,6 +43,10 @@ bool keyv2_fid_is_foreign_to_openpgp(uint16_t fid) {
     if (fid == EF_META || fid == EF_PHY || fid == EF_MKEK || fid == 0x1122 /* EF_DEV_CONF */) {
         return true;
     }
+    /* Almacén de PIN del backend de pruebas "model" del secure element (se_model.c) */
+    if ((fid & 0xfff0) == 0xee00) {
+        return true;
+    }
     uint8_t prefix = (uint8_t)(fid >> 8);
     /* Contenedores dinámicos de FIDO: OATH 0xB0-0xB5, OTP 0xB6-0xB9, OATH/OTP 0xBA-0xBB,
        credenciales 0xCF, residentes 0xD0-0xDC y 0xE0-0xE3. Vault del SDK 0xC4-0xC9: compartido. */

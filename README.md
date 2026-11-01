@@ -19,9 +19,11 @@ combines in a single firmware what usually needs several keys:
 
 Website: <https://cardeakey.org>
 
-> **Status: prototype, not audited.** Phase 0 (one unified firmware, tested on a bare Pico 2) is
-> complete and released as **v0.1.1** (v0.1.0 plus a FIDO2 PIN fix). Do not rely on it as your only key yet. Next phases add an external secure element
-> (NXP SE051) for the PIN and root keys, and a fingerprint sensor. See [Roadmap](#roadmap).
+> **Status: experimental prototype, not audited.** Phase 0 (one unified firmware, tested on a bare
+> Pico 2) and phase 1 (NXP SE051 secure element support) are released as **v0.2.0**. Phase 1 has
+> been validated against a simulated SE05x only, **not yet on a real SE051C2** chip. Do not rely on
+> it as your only key. Next: tests on the real chip, then a fingerprint sensor. See
+> [Roadmap](#roadmap).
 
 ## How it is built
 
@@ -50,7 +52,8 @@ the issues we found while testing, among them:
 - Raspberry Pi **Pico 2** (RP2350). The BOOTSEL button is the user-presence button and the
   on-board LED shows the state: short blinks when idle, **steady on when the key is waiting for a
   touch**.
-- That's all for now. Phase 1 adds an NXP SE051C2 secure element over I2C.
+- Optional: an **NXP SE051C2** secure element on I2C0 (SDA GP4, SCL GP5, address 0x48), e.g. on a
+  MIKROE-5392 "SE051 Plug & Trust Click" board, for the `se05x` firmware below.
 
 ## Building
 
@@ -73,15 +76,44 @@ Main build options (`-D<option>=ON|OFF`):
 | `ENABLE_VAULT` | ON | Passkey backups (inactive until each key is enrolled). OFF removes the code. |
 | `KEYV2_VAULT_CA_CERT` | Cardea Key Vault CA | Root certificate (PEM) of the vault CA. Point it at your own CA. |
 | `FORCE_BUTTON_WAIT` | ON | Require a real button press for user presence. |
-| `CARDEA_SE` | `soft` | Secure-element backend. `soft`: no chip, same security and data as v0.1.0. `se05x` (NXP SE051): in progress, phase 1. |
+| `CARDEA_SE` | `soft` | Secure-element backend. `soft`: no chip, same security and data as v0.1.0. `se05x`: NXP SE051 on I2C (see [Two firmwares](#two-firmwares-soft-and-se05x)). |
+| `CARDEA_SE_FALLBACK` | **OFF** | `se05x` only. OFF: without the chip the key does not run (SE FAULT). ON (bench only): it runs on the flash keys instead. |
 | `ENABLE_OATH_APP`, `ENABLE_OTP_APP` | ON | OATH and OTP-slot applications. |
 | `USB_VID`, `USB_PID` | `0x1209`, `0x0001` | USB IDs (see below). |
 
+## Two firmwares: `soft` and `se05x`
+
+Each release has two builds. **Both are experimental.**
+
+| | `cardea_key-vX.Y.Z-soft.uf2` | `cardea_key-vX.Y.Z-se05x.uf2` |
+|---|---|---|
+| Hardware | a bare Pico 2 | Pico 2 **plus an SE051C2** wired to GP4/GP5 |
+| Root key | master key in the Pico's flash | inside the SE051 (key derivation runs in the chip) |
+| PINs and retry counters | in the Pico's flash | inside the SE051 (authentication objects with their own counter; the PIN never crosses the bus) |
+| Link to the chip | — | encrypted and authenticated (Platform SCP03) |
+| Without the chip | n/a | **SE FAULT**: the key refuses to work (see below) |
+| Tested | on the board, all applications | against a simulated SE05x only, not yet on a real chip |
+
+**What the `se05x` build does not do yet.** It runs in *test mode*: the SCP03 channel uses the
+SE051C2 factory keys (public), and the master key is also kept in the flash, so that losing the
+chip during development does not lose the data. **Today it protects no more than `soft`.** Leaving
+test mode (per-device channel keys, root key generated in the chip and removed from the flash)
+comes after the real-chip tests.
+
+**SE FAULT.** If the `se05x` build finds no SE051 at power-up (or the root key is not in it), no
+application answers, the USB product name ends in "SE FAULT" (it shows up as such in the
+smart-card reader name), and the LED flashes three times quickly, then pauses. Nothing is erased:
+plug the chip back in and power-cycle. A key in SE FAULT can still be rebooted into BOOTSEL with
+`scripts/cardea-bootsel.sh`.
+
+Switching between the two builds on the same Pico keeps the data, but once a PIN has moved into
+the chip, the `soft` build can no longer check it.
+
 ## Flashing
 
-Download `cardea_key.uf2` from the [latest release](https://github.com/shosoin/cardea-key/releases/latest)
-(check its SHA-256) or build it yourself. Hold BOOTSEL while plugging the Pico 2 in, then copy
-`cardea_key.uf2` to the `RP2350` drive. Data
+Download the build you want from the [latest release](https://github.com/shosoin/cardea-key/releases/latest)
+(check its SHA-256 in `SHA256SUMS`) or build it yourself. Hold BOOTSEL while plugging the Pico 2
+in, then copy the `.uf2` file to the `RP2350` drive. Data
 on the key (PIN, credentials) survives firmware updates. A key already running Cardea Key can be
 rebooted into BOOTSEL with `scripts/cardea-bootsel.sh` (needs a button press).
 
@@ -115,7 +147,7 @@ CA. Details and the `scripts/cardea-vault.py` tool: [docs/vault.md](docs/vault.m
 | Phase | What | Status |
 |---|---|---|
 | 0 | Unify pico-fido and pico-openpgp in one firmware; test on a bare Pico 2 without touching OTP | **done** |
-| 1 | NXP SE051C2 secure element: PIN and retry counter in the SE, root key out of the flash | planned |
+| 1 | NXP SE051C2 secure element: PIN and retry counter in the SE, root key out of the flash | **done** on a simulated chip (v0.2.0); real-chip tests pending |
 | 2 | Fingerprint sensor as user presence, time-limited biometric unlock | planned |
 | 3 | Own PCB | after 0-2 |
 

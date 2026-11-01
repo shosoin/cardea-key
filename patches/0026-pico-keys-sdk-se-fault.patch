@@ -1,0 +1,169 @@
+--- a/src/apdu.c
++++ b/src/apdu.c
+@@ -19,6 +19,10 @@
+ #include "apdu.h"
+ #include "led/led.h"
+ #include "usb.h"
++#ifdef PICOKEYS_SE_HOOKS
++#include "cardea_se.h"
++extern const uint8_t rescue_aid[];
++#endif
+ #include <stdio.h>
+ #ifdef ESP_PLATFORM
+ #include "compat/esp_compat.h"
+@@ -98,6 +102,24 @@
+     if (!(CLA(apdu) & 0x10) && (CLA(apdu) & 0x0C) && (!current_app || !current_app->supports_secure_messaging)) {
+         return SW_CLA_NOT_SUPPORTED();
+     }
++#ifdef PICOKEYS_SE_HOOKS
++    /* Cardea Key: SE FAULT (the secure element did not come up at boot and the build has no
++     * fallback). No application runs: only the rescue applet answers, so the key can still be
++     * rebooted to BOOTSEL and re-flashed without the button. */
++    if (cardea_se_fault()) {
++        if (is_select) {
++            if (apdu.nc == rescue_aid[0] && memcmp(apdu.data, rescue_aid + 1, rescue_aid[0]) == 0 &&
++                select_app(CONST_BYTE_ARRAY(apdu.data, apdu.nc)) == PICOKEYS_OK) {
++                return SW_OK();
++            }
++            current_app = NULL;
++            return set_res_sw(0x6F, 0x00);
++        }
++        if (!current_app || current_app->aid != rescue_aid) {
++            return set_res_sw(0x6F, 0x00);
++        }
++    }
++#endif
+     if (INS(apdu) == 0xA4 && P1(apdu) == 0x04 && (P2(apdu) == 0x00 || P2(apdu) == 0x4)) { //select by AID
+         if (select_app(CONST_BYTE_ARRAY(apdu.data, apdu.nc)) == PICOKEYS_OK) {
+             return SW_OK();
+--- a/src/button.c
++++ b/src/button.c
+@@ -18,6 +18,9 @@
+ #include "picokeys.h"
+ #include "button.h"
+ #include "led/led.h"
++#ifdef PICOKEYS_SE_HOOKS
++#include "cardea_se.h"
++#endif
+ #include "pico_time.h"
+ #if defined(PICO_PLATFORM)
+ #include "pico/multicore.h"
+@@ -264,7 +267,11 @@
+                 button_pressed_state = current_button_state;
+             }
+             if (button_pressed_time > 0 && button_press > 0 && button_pressed_time + 1000 < now && button_pressed_state == false) {
++#ifdef PICOKEYS_SE_HOOKS
++                if (button_pressed_cb != NULL && !cardea_se_fault()) {   /* Cardea Key: no OTP typing in SE FAULT */
++#else
+                 if (button_pressed_cb != NULL) {
++#endif
+                     (*button_pressed_cb)(button_press);
+                 }
+                 button_pressed_time = button_press = 0;
+--- a/src/led/led.c
++++ b/src/led/led.c
+@@ -17,6 +17,9 @@
+ 
+ #include "picokeys.h"
+ #include "led/led.h"
++#ifdef PICOKEYS_SE_HOOKS
++#include "cardea_se.h"
++#endif
+ #include "pico_time.h"
+ #if defined(ESP_PLATFORM)
+ #include "driver/gpio.h"
+@@ -68,6 +71,20 @@
+     static uint32_t blink_deadline_ms = 0;
+ 
+     uint32_t now = board_millis();
++#ifdef PICOKEYS_SE_HOOKS
++    /* Cardea Key: SE FAULT overrides every other pattern: three quick red flashes, then a pause
++     * (100 on / 100 off x3, 1.2 s off), over and over. */
++    if (cardea_se_fault()) {
++        static uint32_t fault_last_ms = 0;
++        uint32_t t = now % 1800;
++        bool on = t < 600 && (t % 200) < 100;
++        if (now - fault_last_ms > 2) {
++            led_driver->set_color(on ? LED_COLOR_RED : LED_COLOR_OFF, on ? MAX_BTNESS : 0, on ? 1.0f : 0.0f);
++            fault_last_ms = now;
++        }
++        return;
++    }
++#endif
+     if (blink_pending) {
+         blink_pending = false;
+         blink_active = true;
+--- a/src/usb/hid/hid.c
++++ b/src/usb/hid/hid.c
+@@ -28,6 +28,9 @@
+ #include "emulation.h"
+ #endif
+ #include "ctap_hid.h"
++#ifdef PICOKEYS_SE_HOOKS
++#include "cardea_se.h"
++#endif
+ #include "picokeys_version.h"
+ #include "apdu.h"
+ #include "usb.h"
+@@ -578,6 +581,13 @@
+         }
+         else if ((last_cmd == CTAPHID_CBOR || last_cmd >= CTAPHID_VENDOR_FIRST) &&
+                  (msg_packet.len == 0 || (msg_packet.len == msg_packet.current_len && msg_packet.len > 0))) {
++#ifdef PICOKEYS_SE_HOOKS
++            if (cardea_se_fault()) {   /* Cardea Key: SE FAULT, no FIDO2 */
++                msg_packet.len = msg_packet.current_len = 0;
++                last_packet_time = 0;
++                return ctap_error(CTAP1_ERR_OTHER);
++            }
++#endif
+             thread_type = 2;
+             cancel_button = false;
+             select_app(CONST_BYTE_ARRAY(fido_aid + 1, fido_aid[0]));
+--- a/src/usb/usb_descriptors.c
++++ b/src/usb/usb_descriptors.c
+@@ -23,6 +23,9 @@
+ #include "picokeys_version.h"
+ #include "usb.h"
+ #include "serial.h"
++#ifdef PICOKEYS_SE_HOOKS
++#include "cardea_se.h"
++#endif
+ 
+ #ifndef USB_VID
+ #define USB_VID   0x2E8A
+@@ -401,13 +404,24 @@
+         }
+ 
+         const char *str = string_desc_arr[index];
++        const char *product = phy_data.usb_product_present ? phy_data.usb_product : string_desc_arr[2];
++#ifdef PICOKEYS_SE_HOOKS
++        /* Cardea Key: SE FAULT shows in the product name (and the interface names built from it),
++         * so the host tells the user what is wrong as soon as the key is plugged in. */
++        static char fault_product[32];
++        if (cardea_se_fault()) {
++            static const char tag[] = " SE FAULT";
++            size_t n = MIN(strlen(product), sizeof(fault_product) - sizeof(tag));
++            memcpy(fault_product, product, n);
++            memcpy(fault_product + n, tag, sizeof(tag));
++            product = fault_product;
++        }
++#endif
+         if (index == 3) {
+             str = pico_serial_str;
+         }
+         else if (index == 2) {
+-            if (phy_data.usb_product_present) {
+-                str = phy_data.usb_product;
+-            }
++            str = product;
+         }
+         else if (index >= 6 && string_desc_itf[index - 6] != NULL) {
+             str = string_desc_itf[index - 6];
+@@ -424,7 +438,6 @@
+ 
+         uint8_t buff_avail = sizeof(_desc_str) / sizeof(_desc_str[0]) - 1;
+         if (index >= 6) {
+-            const char *product = phy_data.usb_product_present ? phy_data.usb_product : string_desc_arr[2];
+             uint8_t len = (uint8_t)MIN(strlen(product), buff_avail);
+             for (size_t ix = 0; ix < len; chr_count++, ix++) {
+                 _desc_str[1 + chr_count] = product[ix];

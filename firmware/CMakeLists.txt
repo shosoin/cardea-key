@@ -54,15 +54,31 @@ option(KEYV2_LED_PATTERNS "LED: patrones key-v2 sin fundidos (reposo=destello, b
 configure_bool_option(KEYV2_LED_PATTERNS KEYV2_LED_PATTERNS "LED patterns: \t\t key-v2 (button = steady on)" "LED patterns: \t\t upstream")
 option(ENABLE_ADMINLESS_MODE "OpenPGP: Gnuk-compatible admin-less PIN mode (upstream default ON)" ON)
 # Secure element (fase 1, docs: src/se/cardea_se.h). soft = sin chip, misma seguridad y mismos
-# datos que la v0.1.0; se05x = NXP SE051 por I2C (pendiente).
-set(CARDEA_SE "soft" CACHE STRING "Secure element backend: soft | se05x")
-set_property(CACHE CARDEA_SE PROPERTY STRINGS soft se05x)
+# datos que la v0.1.0; model = SOLO PRUEBAS, imita en la flash los PIN del chip (#3); se05x =
+# NXP SE051 por I2C (en curso).
+set(CARDEA_SE "soft" CACHE STRING "Secure element backend: soft | model | se05x")
+set_property(CACHE CARDEA_SE PROPERTY STRINGS soft model se05x)
 if(CARDEA_SE STREQUAL "soft")
     message(STATUS "Secure element: \t\t soft (no chip; root key = MKEK, as v0.1.0)")
+elseif(CARDEA_SE STREQUAL "model")
+    message(WARNING "CARDEA_SE=model is a TEST backend: PINs and their retry counters are imitated in flash and protect nothing")
 elseif(CARDEA_SE STREQUAL "se05x")
-    message(FATAL_ERROR "CARDEA_SE=se05x: backend not implemented yet (issues #4, #5, #6)")
+    message(STATUS "Secure element: \t\t se05x (NXP SE051 over I2C0 GP4/GP5, Platform SCP03, root key and PINs in the chip)")
+    message(WARNING "CARDEA_SE=se05x: PINs in the chip with ECKey sessions (#3 part B, tested on the simulator only)")
 else()
-    message(FATAL_ERROR "CARDEA_SE must be soft or se05x, not '${CARDEA_SE}'")
+    message(FATAL_ERROR "CARDEA_SE must be soft, model or se05x, not '${CARDEA_SE}'")
+endif()
+# Sin SE al arrancar: por defecto, como la llave final, no funciona (SE FAULT: LED de fallo, nombre
+# USB "... SE FAULT", ninguna aplicación responde; la flash no se toca). ON = SOLO BANCO: sigue sin
+# chip (raíz = MKEK, PIN en el almacén de pruebas del model mientras ninguno esté en el chip).
+option(CARDEA_SE_FALLBACK "se05x: run without the SE (MKEK root, model PIN store) instead of SE FAULT; bench only" OFF)
+if(CARDEA_SE STREQUAL "se05x")
+    if(CARDEA_SE_FALLBACK)
+        message(WARNING "CARDEA_SE_FALLBACK=ON: without the SE the key runs on the MKEK and the TEST PIN store (bench only)")
+        add_compile_definitions(CARDEA_SE_FALLBACK=1)
+    else()
+        message(STATUS "SE fallback: \t\t OFF (no SE at boot = SE FAULT, key does not run)")
+    endif()
 endif()
 add_compile_definitions(PICOKEYS_SE_HOOKS=1)
 
@@ -159,6 +175,54 @@ list(TRANSFORM PGP_SOURCES PREPEND ${PGP_DIR}/)
 
 set(GLUE_SOURCES ${CMAKE_CURRENT_LIST_DIR}/src/keyv2_glue.c ${CMAKE_CURRENT_LIST_DIR}/src/se/se_${CARDEA_SE}.c)
 
+# Backend se05x: NXP Plug & Trust (BSD-3-Clause, third_party/plug-and-trust), only the T=1-over-I2C
+# layer and the Se05x_API_* APDU layer (no SSS, no host crypto, no SCP03 yet). Its headers and
+# defines apply only to these files, so they cannot clash with pico-keys headers.
+set(SE05X_SOURCES "")
+if(CARDEA_SE STREQUAL "se05x")
+    set(PNT ${TP}/plug-and-trust/hostlib/hostLib)
+    set(SE05X_SOURCES
+        ${PNT}/libCommon/smCom/smCom.c
+        ${PNT}/libCommon/smCom/smComT1oI2C.c
+        ${PNT}/libCommon/smCom/T1oI2C/phNxpEse_Api.c
+        ${PNT}/libCommon/smCom/T1oI2C/phNxpEsePal_i2c.c
+        ${PNT}/libCommon/smCom/T1oI2C/phNxpEseProto7816_3.c
+        ${PNT}/libCommon/infra/sm_connect.c
+        ${PNT}/libCommon/infra/global_platf.c
+        ${PNT}/libCommon/infra/sm_apdu.c
+        ${PNT}/libCommon/infra/sm_errors.c
+        ${PNT}/libCommon/infra/sm_printf.c
+        ${PNT}/libCommon/log/nxLog.c
+        ${PNT}/se05x/src/se05x_tlv.c
+        ${PNT}/se05x_03_xx_xx/se05x_APDU.c
+        ${CMAKE_CURRENT_LIST_DIR}/src/se/nxp/pico_se05x_platform.c)
+    set(SE05X_INCLUDES
+        ${CMAKE_CURRENT_LIST_DIR}/src/se/nxp ${CMAKE_CURRENT_LIST_DIR}/src/se
+        ${PNT}/inc ${PNT}/libCommon/infra ${PNT}/libCommon/log ${PNT}/libCommon/smCom
+        ${PNT}/libCommon/smCom/T1oI2C ${PNT}/se05x_03_xx_xx ${PNT}/platform/inc
+        ${TP}/plug-and-trust/sss/inc ${TP}/plug-and-trust/sss/port/default)
+    # AX_EMBEDDED: bare metal, no pthread locks. Only one core may talk to the SE at a time.
+    set(SE05X_DEFINES SSS_USE_FTR_FILE SMCOM_T1oI2C T1oI2C T1oI2C_UM11225 T1OI2C_RETRY_ON_I2C_FAILED AX_EMBEDDED=1)
+    # Third-party code: build it, but do not turn its warnings into errors.
+    set_source_files_properties(${SE05X_SOURCES} PROPERTIES
+        INCLUDE_DIRECTORIES "${SE05X_INCLUDES}"
+        COMPILE_DEFINITIONS "${SE05X_DEFINES}"
+        COMPILE_OPTIONS "-Wno-error;-w")
+endif()
+if(NOT CARDEA_SE STREQUAL "soft")
+    # The soft backend stays as fallback for the root key (renamed cardea_se_soft_*).
+    list(APPEND GLUE_SOURCES ${CMAKE_CURRENT_LIST_DIR}/src/se/se_soft.c)
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/src/se/se_soft.c PROPERTIES
+        COMPILE_DEFINITIONS "CARDEA_SE_SOFT_AS_FALLBACK")
+endif()
+if(CARDEA_SE STREQUAL "se05x")
+    # PINs inside the chip (ECKey sessions); the model's test store (renamed cardea_se_model_pin_*)
+    # is the fallback without a link and the source of the migration on the bench.
+    list(APPEND GLUE_SOURCES ${CMAKE_CURRENT_LIST_DIR}/src/se/se05x_pin.c ${CMAKE_CURRENT_LIST_DIR}/src/se/se_model.c)
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/src/se/se_model.c PROPERTIES
+        COMPILE_DEFINITIONS "CARDEA_SE_MODEL_AS_PIN_STORE")
+endif()
+
 # Cada app con sus propias cabeceras: las dos tienen files.h, version.h, management.h,
 # object_provider.h... con el mismo nombre y distinto contenido.
 set_source_files_properties(${FIDO_SOURCES} PROPERTIES INCLUDE_DIRECTORIES "${FIDO_DIR}")
@@ -167,8 +231,14 @@ set_source_files_properties(${PGP_SOURCES} PROPERTIES
     # cmd_version existe en FIDO y en PIV
     COMPILE_DEFINITIONS "cmd_version=piv_cmd_version;ENABLE_ADMINLESS_MODE=$<BOOL:${ENABLE_ADMINLESS_MODE}>")
 set_source_files_properties(${GLUE_SOURCES} PROPERTIES INCLUDE_DIRECTORIES "${GEN_DIR}")
+if(CARDEA_SE STREQUAL "se05x")
+    # Our backend: NXP headers and defines, with all our usual warnings.
+    set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/src/se/se_se05x.c PROPERTIES
+        INCLUDE_DIRECTORIES "${GEN_DIR};${SE05X_INCLUDES}"
+        COMPILE_DEFINITIONS "${SE05X_DEFINES}")
+endif()
 
-set(SOURCES ${PICOKEYS_SOURCES} ${FIDO_SOURCES} ${PGP_SOURCES} ${GLUE_SOURCES})
+set(SOURCES ${PICOKEYS_SOURCES} ${FIDO_SOURCES} ${PGP_SOURCES} ${GLUE_SOURCES} ${SE05X_SOURCES})
 target_sources(cardea_key PUBLIC ${SOURCES})
 target_include_directories(cardea_key PUBLIC ${INCLUDES} ${GEN_DIR} ${CMAKE_CURRENT_LIST_DIR}/src/se)
 target_compile_options(cardea_key PRIVATE -Wall)
@@ -181,4 +251,7 @@ picokeys_apply_strict_flags(
 target_link_libraries(cardea_key PRIVATE
     picokeys_sdk pico_stdlib pico_multicore hardware_flash hardware_sync hardware_adc
     pico_unique_id pico_aon_timer tinyusb_device tinyusb_board)
+if(CARDEA_SE STREQUAL "se05x")
+    target_link_libraries(cardea_key PRIVATE hardware_i2c)
+endif()
 pico_add_extra_outputs(cardea_key)

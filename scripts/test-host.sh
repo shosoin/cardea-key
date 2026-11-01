@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Cardea Key — pruebas en el PC (sin placa). Compila con el mbedTLS de third_party/ (hay que haber
-# pasado scripts/fetch-sources.sh) y las ejecuta. Hoy: equivalencia del backend "soft" del secure
-# element con la derivación de la v0.1.0 (firmware/tests/test_se_soft.c).
+# pasado scripts/fetch-sources.sh) y las ejecuta:
+#   - equivalencia del backend "soft" del secure element con la derivación de la v0.1.0
+#     (firmware/tests/test_se_soft.c);
+#   - semántica de PIN del backend "model" (firmware/tests/test_se_model.c).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 M="$ROOT/third_party/pico-keys-sdk/third-party/mbedtls"
@@ -11,7 +13,13 @@ trap 'rm -r "$OUT"' EXIT
 # Las fuentes propias con avisos; mbedTLS sin ellos (es código de terceros).
 gcc -O1 -Wall -Wextra -c -o "$OUT/se_soft.o" -I"$ROOT/firmware/src/se" -I"$SDK" -I"$SDK/rng" -I"$M/include" "$ROOT/firmware/src/se/se_soft.c"
 gcc -O1 -Wall -Wextra -c -o "$OUT/test.o" -I"$ROOT/firmware/src/se" -I"$SDK" -I"$M/include" "$ROOT/firmware/tests/test_se_soft.c"
-gcc -O1 -w -o "$OUT/test_se_soft" "$OUT/se_soft.o" "$OUT/test.o" \
-  -I"$M/include" -I"$M/library" \
-  "$M"/library/*.c
+# mbedTLS una sola vez, como biblioteca
+mkdir -p "$OUT/mbedtls"
+(cd "$OUT/mbedtls" && gcc -O1 -w -c -I"$M/include" -I"$M/library" "$M"/library/*.c)
+ar rcs "$OUT/libmbedcrypto.a" "$OUT"/mbedtls/*.o
+gcc -O1 -o "$OUT/test_se_soft" "$OUT/se_soft.o" "$OUT/test.o" "$OUT/libmbedcrypto.a"
 "$OUT/test_se_soft"
+gcc -O1 -Wall -Wextra -DCARDEA_MODEL_HOST_TEST -c -o "$OUT/se_model.o" -I"$ROOT/firmware/src/se" -I"$M/include" "$ROOT/firmware/src/se/se_model.c"
+gcc -O1 -Wall -Wextra -c -o "$OUT/test_model.o" -I"$ROOT/firmware/src/se" -I"$SDK" -I"$M/include" "$ROOT/firmware/tests/test_se_model.c"
+gcc -O1 -o "$OUT/test_se_model" "$OUT/se_model.o" "$OUT/test_model.o" "$OUT/libmbedcrypto.a"
+"$OUT/test_se_model"

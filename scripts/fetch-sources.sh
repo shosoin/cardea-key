@@ -2,7 +2,8 @@
 # Cardea Key — prepara third_party/ con upstream fijado por commit y aplica patches/.
 #
 # Qué hace:
-#   1. Clona pico-fido, pico-openpgp, pico-keys-sdk, pico-sdk y picotool en los commits anotados
+#   1. Clona pico-fido, pico-openpgp, pico-keys-sdk, pico-sdk, picotool y plug-and-trust (NXP, para
+#      el backend se05x del secure element) en los commits anotados
 #      en la lista REPOS de abajo.
 #   2. Descarga las dependencias del SDK de Pico Keys (mbedtls, tinycbor, libcvc) dentro de
 #      pico-keys-sdk/third-party/ con su fichero marcador, para que CMake no vuelva a clonarlas
@@ -25,6 +26,7 @@ REPOS=(
   "pico-keys-sdk https://github.com/polhenarejos/pico-keys-sdk.git   a2f0a51588fb523f2d6614e008b4bdbb45e443f1"
   "pico-sdk      https://github.com/raspberrypi/pico-sdk.git         079c6f39023649b154152db30f1d781e884879bc"
   "picotool      https://github.com/raspberrypi/picotool.git         2041936441b48a3cc53ae3da9e805229fe8f4e18"
+  "plug-and-trust https://github.com/NXP/plug-and-trust.git          7102413e0457d3dfa4fc4be686ca8ec50bd9f5e2"
 )
 # Dependencias del SDK de Pico Keys: nombre url ref(tal como la pide cmake/deps.cmake) commit
 DEPS=(
@@ -72,7 +74,7 @@ shopt -s nullglob
 for p in "$ROOT"/patches/*.patch; do
   base="$(basename "$p")"
   repo=""
-  for r in pico-keys-sdk pico-fido pico-openpgp pico-sdk picotool; do
+  for r in pico-keys-sdk pico-fido pico-openpgp pico-sdk picotool plug-and-trust; do
     [[ "$base" == [0-9][0-9][0-9][0-9]-"$r"-* ]] && repo="$r"
   done
   [[ -n "$repo" ]] || { echo "ERROR: no sé a qué repo va $base" >&2; exit 1; }

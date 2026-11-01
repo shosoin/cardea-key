@@ -1,0 +1,411 @@
+--- a/src/fido/cbor_client_pin.c
++++ b/src/fido/cbor_client_pin.c
+@@ -34,6 +34,9 @@
+ #include "crypto_utils.h"
+ #include "apdu.h"
+ #include "object_authorization.h"
++#ifdef PICOKEYS_SE_HOOKS
++#include "cardea_se.h"
++#endif
+ 
+ uint32_t usage_timer = 0, initial_usage_time_limit = 0;
+ uint32_t max_usage_time_period  = 600 * 1000;
+@@ -405,6 +408,109 @@
+ 
+ uint8_t new_pin_mismatches = 0;
+ 
++/* Retries left: byte 0 of EF_PIN, or the secure element when the PIN lives there. < 0: SE error. */
++static int pin_retries_left(void);
++
++#ifdef PICOKEYS_SE_HOOKS
++/*
++ * Cardea Key (issue #3): the PIN in the secure element. With a backend that keeps PINs
++ * (cardea_se_pin_managed()), EF_PIN keeps its 35-byte layout (power-cycle flag, code points) with
++ * format PIN_FORMAT_SE and no verifier: the verifier, the retry counter and the secret that wraps
++ * the device key live in the backend. A v0.1.0 EF_PIN moves there on the first correct PIN. With
++ * the soft backend nothing changes.
++ */
++#define PIN_FORMAT_SE 2
++
++static bool pin_data_in_se(const uint8_t *pin_data, uint16_t pin_data_len) {
++    return pin_data_len == PIN_DATA_LEN && pin_data[2] == PIN_FORMAT_SE;
++}
++
++static bool pin_file_in_se(void) {
++    return file_has_data(ef_pin) && file_get_size(ef_pin) == PIN_DATA_LEN && file_get_data(ef_pin)[2] == PIN_FORMAT_SE;
++}
++
++/* EF_PIN when the PIN is in the SE: retries byte (only its power-cycle flag means something), code
++ * points, PIN_FORMAT_SE, and zeros where the verifier was. */
++static void pin_data_for_se(uint8_t pin_data[PIN_DATA_LEN], uint8_t codepoints) {
++    memset(pin_data, 0, PIN_DATA_LEN);
++    pin_data[0] = MAX_PIN_RETRIES;
++    pin_data[1] = codepoints;
++    pin_data[2] = PIN_FORMAT_SE;
++}
++
++/* Checks the PIN in the SE. 0 = right, and session_pin holds the slot secret. Otherwise a CTAP
++ * error, with the same per-boot rule as the flash path (3 mismatches ask for a power cycle). */
++static int pin_verify_se(const uint8_t pin_hash[16], uint8_t pin_data[PIN_DATA_LEN]) {
++    uint8_t secret[32], remaining = 0;
++    int r = cardea_se_pin_verify(CARDEA_SE_PIN_FIDO, pin_hash, 16, secret, &remaining);
++    if (r == CARDEA_SE_PIN_OK) {
++        memcpy(session_pin, secret, sizeof(secret));
++        mbedtls_platform_zeroize(secret, sizeof(secret));
++        return 0;
++    }
++    if (r == CARDEA_SE_PIN_BLOCKED) {
++        return CTAP2_ERR_PIN_BLOCKED;
++    }
++    if (r != CARDEA_SE_PIN_WRONG) {
++        return CTAP2_ERR_PROCESSING;
++    }
++    regenerate();
++    resetPinUvAuthToken();
++    if (remaining == 0) {
++        return CTAP2_ERR_PIN_BLOCKED;
++    }
++    bool power_cycle_locked = (pin_data[0] & PIN_RETRY_POWER_CYCLE) != 0;
++    if (power_cycle_locked || ++new_pin_mismatches >= 3) {
++        if (!power_cycle_locked) {
++            pin_data[0] |= PIN_RETRY_POWER_CYCLE;
++            if (!persist_pin_retry_counter(ef_pin, pin_data, PIN_DATA_LEN)) {
++                return CTAP2_ERR_PROCESSING;
++            }
++        }
++        needs_power_cycle = true;
++        return CTAP2_ERR_PIN_AUTH_BLOCKED;
++    }
++    return CTAP2_ERR_PIN_INVALID;
++}
++
++/*
++ * Moves a PIN checked the v0.1.0 way into the SE; session_pin holds the old session key. Order
++ * that survives a power cut at any point: the device key goes to format 1 (not PIN-wrapped, so
++ * valid whatever EF_PIN says) before EF_PIN changes, and is wrapped with the new secret after.
++ */
++static int pin_move_to_se(const uint8_t pin_hash[16], uint8_t codepoints) {
++    uint8_t secret[32], kd[32], pd[PIN_DATA_LEN];
++    if (load_keydev(kd) != PICOKEYS_OK) {
++        return CTAP2_ERR_PIN_INVALID;
++    }
++    if (cardea_se_pin_set(CARDEA_SE_PIN_FIDO, pin_hash, 16, MAX_PIN_RETRIES, secret) != CARDEA_SE_PIN_OK) {
++        mbedtls_platform_zeroize(kd, sizeof(kd));
++        return CTAP2_ERR_PROCESSING;
++    }
++    int ret = encrypt_keydev_f1(kd);
++    mbedtls_platform_zeroize(kd, sizeof(kd));
++    if (ret != PICOKEYS_OK) {
++        mbedtls_platform_zeroize(secret, sizeof(secret));
++        return CTAP2_ERR_PROCESSING;
++    }
++    pin_data_for_se(pd, codepoints);
++    file_put_data(ef_pin, CONST_BYTE_ARRAY(pd, sizeof(pd)));
++    flash_commit();
++    memcpy(session_pin, secret, sizeof(secret));
++    mbedtls_platform_zeroize(secret, sizeof(secret));
++    return check_keydev_encrypted(session_pin);
++}
++#endif
++
++static int pin_retries_left(void) {
++#ifdef PICOKEYS_SE_HOOKS
++    if (pin_file_in_se()) {
++        return cardea_se_pin_retries(CARDEA_SE_PIN_FIDO);
++    }
++#endif
++    return file_has_data(ef_pin) ? *file_get_data(ef_pin) & PIN_RETRY_COUNT_MASK : MAX_PIN_RETRIES;
++}
++
+ int cbor_client_pin(const uint8_t *data, size_t len) {
+     size_t resp_size = 0;
+     uint64_t subcommand = 0x0, pinUvAuthProtocol = 0, permissions = 0;
+@@ -469,10 +575,13 @@
+     }
+     else if (subcommand == 0x1) { //getPINRetries
+         bool power_cycle_locked = pin_power_cycle_locked();
+-        uint8_t retries = file_has_data(ef_pin) ? *file_get_data(ef_pin) & PIN_RETRY_COUNT_MASK : MAX_PIN_RETRIES;
++        int retries = pin_retries_left();
++        if (retries < 0) {
++            CBOR_ERROR(CTAP2_ERR_PROCESSING);
++        }
+         CBOR_CHECK(cbor_encoder_create_map(&encoder, &mapEncoder, power_cycle_locked ? 2 : 1));
+         CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x03));
+-        CBOR_CHECK(cbor_encode_uint(&mapEncoder, retries));
++        CBOR_CHECK(cbor_encode_uint(&mapEncoder, (uint64_t)retries));
+         if (power_cycle_locked) {
+             CBOR_CHECK(cbor_encode_uint(&mapEncoder, 0x04));
+             CBOR_CHECK(cbor_encode_boolean(&mapEncoder, true));
+@@ -557,11 +666,26 @@
+         hsh[2] = 1; // New format indicator
+         mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), paddedNewPin, pin_byte_len, dhash);
+         mbedtls_platform_zeroize(paddedNewPin, sizeof(paddedNewPin));
++#ifdef PICOKEYS_SE_HOOKS
++        bool se_pins = cardea_se_pin_managed();
++        if (se_pins) {
++            if (cardea_se_pin_set(CARDEA_SE_PIN_FIDO, dhash, 16, MAX_PIN_RETRIES, session_pin) != CARDEA_SE_PIN_OK) {
++                mbedtls_platform_zeroize(dhash, sizeof(dhash));
++                CBOR_ERROR(CTAP2_ERR_PROCESSING);
++            }
++            pin_data_for_se(hsh, (uint8_t)pin_codepoints);
++        }
++        else
++#else
++        const bool se_pins = false;
++#endif
+         pin_derive_verifier(CONST_BYTE_ARRAY(dhash, 16), hsh + 3);
+         file_put_data(ef_pin, CONST_BYTE_ARRAY(hsh, sizeof(hsh)));
+         flash_commit();
+ 
+-        pin_derive_session(CONST_BYTE_ARRAY(dhash, 16), session_pin);
++        if (!se_pins) {
++            pin_derive_session(CONST_BYTE_ARRAY(dhash, 16), session_pin);
++        }
+         ret = check_keydev_encrypted(session_pin);
+         if (ret != PICOKEYS_OK) {
+             CBOR_ERROR(ret);
+@@ -585,7 +709,11 @@
+         if (!file_has_data(ef_pin)) {
+             CBOR_ERROR(CTAP2_ERR_PIN_NOT_SET);
+         }
+-        if ((*file_get_data(ef_pin) & PIN_RETRY_COUNT_MASK) == 0) {
++        int retries_left = pin_retries_left();
++        if (retries_left < 0) {
++            CBOR_ERROR(CTAP2_ERR_PROCESSING);
++        }
++        if (retries_left == 0) {
+             CBOR_ERROR(CTAP2_ERR_PIN_BLOCKED);
+         }
+         if (needs_power_cycle) {
+@@ -625,14 +753,22 @@
+             mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
+             CBOR_ERROR(CTAP2_ERR_PROCESSING);
+         }
+-        if ((pin_data[0] & PIN_RETRY_COUNT_MASK) == 0) {
+-            mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
+-            CBOR_ERROR(CTAP2_ERR_PIN_BLOCKED);
+-        }
+-        pin_data[0] = (uint8_t)((pin_data[0] & PIN_RETRY_POWER_CYCLE) | ((pin_data[0] & PIN_RETRY_COUNT_MASK) - 1));
+-        if (!persist_pin_retry_counter(ef_pin, pin_data, pin_data_len)) {
+-            mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
+-            CBOR_ERROR(CTAP2_ERR_PROCESSING);
++#ifdef PICOKEYS_SE_HOOKS
++        /* PIN in the SE: the SE counts the attempt (pin_verify_se), not byte 0 of EF_PIN. */
++        bool in_se = pin_data_in_se(pin_data, pin_data_len);
++#else
++        const bool in_se = false;
++#endif
++        if (!in_se) {
++            if ((pin_data[0] & PIN_RETRY_COUNT_MASK) == 0) {
++                mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
++                CBOR_ERROR(CTAP2_ERR_PIN_BLOCKED);
++            }
++            pin_data[0] = (uint8_t)((pin_data[0] & PIN_RETRY_POWER_CYCLE) | ((pin_data[0] & PIN_RETRY_COUNT_MASK) - 1));
++            if (!persist_pin_retry_counter(ef_pin, pin_data, pin_data_len)) {
++                mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
++                CBOR_ERROR(CTAP2_ERR_PROCESSING);
++            }
+         }
+         uint8_t retries = pin_data[0] & PIN_RETRY_COUNT_MASK;
+         bool power_cycle_locked = (pin_data[0] & PIN_RETRY_POWER_CYCLE) != 0;
+@@ -650,7 +786,19 @@
+         else {
+             pin_derive_verifier(CONST_BYTE_ARRAY(paddedNewPin, 16), dhash);
+         }
+-
++#ifdef PICOKEYS_SE_HOOKS
++        uint8_t old_pin_hash[16];
++        memcpy(old_pin_hash, paddedNewPin, sizeof(old_pin_hash));
++        if (in_se) {
++            ret = pin_verify_se(paddedNewPin, pin_data);
++            if (ret != 0) {
++                mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
++                mbedtls_platform_zeroize(old_pin_hash, sizeof(old_pin_hash));
++                CBOR_ERROR(ret);
++            }
++        }
++        else
++#endif
+         if (mbedtls_ct_memcmp(dhash, pin_data + off, 32) != 0) {
+             regenerate();
+             resetPinUvAuthToken();
+@@ -690,7 +838,9 @@
+             }
+             encrypt_keydev_f1(keydev);
+         }
+-        pin_derive_session(CONST_BYTE_ARRAY(paddedNewPin, 16), session_pin);
++        if (!in_se) {
++            pin_derive_session(CONST_BYTE_ARRAY(paddedNewPin, 16), session_pin);
++        }
+         pin_data[0] = MAX_PIN_RETRIES;
+         file_put_data(ef_pin, CONST_BYTE_ARRAY(pin_data, sizeof(pin_data)));
+         flash_commit();
+@@ -738,6 +888,30 @@
+         encrypt_keydev_f1(keydev);
+ 
+         mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), paddedNewPin, pin_byte_len, dhash);
++#ifdef PICOKEYS_SE_HOOKS
++        /* PIN in the SE (or moving there now): change it there, keeping the secret, or create it
++         * with a new one. EF_PIN changes before the device key is wrapped again (see
++         * pin_move_to_se). */
++        bool se_pins = cardea_se_pin_managed();
++        if (se_pins) {
++            if (minpin_record_has_header(ef_minpin) && file_get_data(ef_minpin)[1] == 1 && mbedtls_ct_memcmp(dhash, old_pin_hash, 16) == 0) {
++                CBOR_ERROR(CTAP2_ERR_PIN_POLICY_VIOLATION);
++            }
++            uint8_t remaining = 0;
++            int r = in_se ? cardea_se_pin_change(CARDEA_SE_PIN_FIDO, old_pin_hash, 16, dhash, 16, session_pin, &remaining)
++                          : cardea_se_pin_set(CARDEA_SE_PIN_FIDO, dhash, 16, MAX_PIN_RETRIES, session_pin);
++            mbedtls_platform_zeroize(old_pin_hash, sizeof(old_pin_hash));
++            if (r != CARDEA_SE_PIN_OK) {
++                CBOR_ERROR(r == CARDEA_SE_PIN_BLOCKED ? CTAP2_ERR_PIN_BLOCKED : CTAP2_ERR_PROCESSING);
++            }
++            pin_data_for_se(pin_data, (uint8_t)pin_codepoints);
++            file_put_data(ef_pin, CONST_BYTE_ARRAY(pin_data, sizeof(pin_data)));
++            flash_commit();
++        }
++        else
++#else
++        const bool se_pins = false;
++#endif
+         pin_derive_session(CONST_BYTE_ARRAY(dhash, 16), session_pin);
+         ret = check_keydev_encrypted(session_pin);
+         if (ret != PICOKEYS_OK) {
+@@ -745,15 +919,17 @@
+         }
+         flash_commit();
+ 
+-        pin_data[0] = MAX_PIN_RETRIES;
+-        pin_data[1] = (uint8_t)pin_codepoints;
+-        pin_data[2] = 1; // New format indicator
+-        pin_derive_verifier(CONST_BYTE_ARRAY(dhash, 16), pin_data + 3);
++        if (!se_pins) {
++            pin_data[0] = MAX_PIN_RETRIES;
++            pin_data[1] = (uint8_t)pin_codepoints;
++            pin_data[2] = 1; // New format indicator
++            pin_derive_verifier(CONST_BYTE_ARRAY(dhash, 16), pin_data + 3);
+ 
+-        if (minpin_record_has_header(ef_minpin) && file_get_data(ef_minpin)[1] == 1 && mbedtls_ct_memcmp(pin_data + 3, file_get_data(ef_pin) + 3, 32) == 0) {
+-            CBOR_ERROR(CTAP2_ERR_PIN_POLICY_VIOLATION);
++            if (minpin_record_has_header(ef_minpin) && file_get_data(ef_minpin)[1] == 1 && mbedtls_ct_memcmp(pin_data + 3, file_get_data(ef_pin) + 3, 32) == 0) {
++                CBOR_ERROR(CTAP2_ERR_PIN_POLICY_VIOLATION);
++            }
++            file_put_data(ef_pin, CONST_BYTE_ARRAY(pin_data, sizeof(pin_data)));
+         }
+-        file_put_data(ef_pin, CONST_BYTE_ARRAY(pin_data, sizeof(pin_data)));
+ 
+         mbedtls_platform_zeroize(pin_data, sizeof(pin_data));
+         mbedtls_platform_zeroize(dhash, sizeof(dhash));
+@@ -799,7 +975,11 @@
+         if (!file_has_data(ef_pin)) {
+             CBOR_ERROR(CTAP2_ERR_PIN_NOT_SET);
+         }
+-        if ((*file_get_data(ef_pin) & PIN_RETRY_COUNT_MASK) == 0) {
++        int retries_left = pin_retries_left();
++        if (retries_left < 0) {
++            CBOR_ERROR(CTAP2_ERR_PROCESSING);
++        }
++        if (retries_left == 0) {
+             CBOR_ERROR(CTAP2_ERR_PIN_BLOCKED);
+         }
+         if (mbedtls_mpi_read_binary(&hkey.ctx.mbed_ecdh.Qp.X, kax.data, kax.len) != 0) {
+@@ -820,14 +1000,22 @@
+             mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
+             CBOR_ERROR(CTAP2_ERR_PROCESSING);
+         }
+-        if ((pin_data[0] & PIN_RETRY_COUNT_MASK) == 0) {
+-            mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
+-            CBOR_ERROR(CTAP2_ERR_PIN_BLOCKED);
+-        }
+-        pin_data[0] = (uint8_t)((pin_data[0] & PIN_RETRY_POWER_CYCLE) | ((pin_data[0] & PIN_RETRY_COUNT_MASK) - 1));
+-        if (!persist_pin_retry_counter(ef_pin, pin_data, pin_data_len)) {
+-            mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
+-            CBOR_ERROR(CTAP2_ERR_PROCESSING);
++#ifdef PICOKEYS_SE_HOOKS
++        /* PIN in the SE: the SE counts the attempt (pin_verify_se), not byte 0 of EF_PIN. */
++        bool in_se = pin_data_in_se(pin_data, pin_data_len);
++#else
++        const bool in_se = false;
++#endif
++        if (!in_se) {
++            if ((pin_data[0] & PIN_RETRY_COUNT_MASK) == 0) {
++                mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
++                CBOR_ERROR(CTAP2_ERR_PIN_BLOCKED);
++            }
++            pin_data[0] = (uint8_t)((pin_data[0] & PIN_RETRY_POWER_CYCLE) | ((pin_data[0] & PIN_RETRY_COUNT_MASK) - 1));
++            if (!persist_pin_retry_counter(ef_pin, pin_data, pin_data_len)) {
++                mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
++                CBOR_ERROR(CTAP2_ERR_PROCESSING);
++            }
+         }
+         uint8_t retries = pin_data[0] & PIN_RETRY_COUNT_MASK;
+         bool power_cycle_locked = (pin_data[0] & PIN_RETRY_POWER_CYCLE) != 0;
+@@ -845,6 +1033,17 @@
+         else {
+             pin_derive_verifier(CONST_BYTE_ARRAY(paddedNewPin, 16), dhash);
+         }
++#ifdef PICOKEYS_SE_HOOKS
++        if (in_se) {
++            ret = pin_verify_se(paddedNewPin, pin_data);
++            if (ret != 0) {
++                mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
++                mbedtls_platform_zeroize(dhash, sizeof(dhash));
++                CBOR_ERROR(ret);
++            }
++        }
++        else
++#endif
+         if (mbedtls_ct_memcmp(dhash, pin_data + off, 32) != 0) {
+             regenerate();
+             resetPinUvAuthToken();
+@@ -887,11 +1086,24 @@
+             encrypt_keydev_f1(keydev);
+         }
+ 
+-        pin_derive_session(CONST_BYTE_ARRAY(paddedNewPin, 16), session_pin);
++        if (!in_se) {
++            pin_derive_session(CONST_BYTE_ARRAY(paddedNewPin, 16), session_pin);
++        }
+         ret = check_keydev_encrypted(session_pin);
+         if (ret != PICOKEYS_OK) {
+             CBOR_ERROR(ret);
+         }
++#ifdef PICOKEYS_SE_HOOKS
++        if (!in_se && cardea_se_pin_managed()) {
++            uint8_t codepoints = pin_data[1];
++            ret = pin_move_to_se(paddedNewPin, codepoints);
++            if (ret != 0) {
++                mbedtls_platform_zeroize(sharedSecret, sizeof(sharedSecret));
++                CBOR_ERROR(ret);
++            }
++            pin_data_for_se(pin_data, codepoints);
++        }
++#endif
+ 
+         pin_data[0] = MAX_PIN_RETRIES;
+         new_pin_mismatches = 0;
+--- a/src/fido/cbor_reset.c
++++ b/src/fido/cbor_reset.c
+@@ -97,6 +97,9 @@
+ #ifdef KEYV2_UNIFIED
+ extern int fido_vault_clear(void);
+ #endif
++#ifdef PICOKEYS_SE_HOOKS
++#include "cardea_se.h"
++#endif
+ 
+ static int fido_reset_storage(void) {
+     fido_reset_context_t context = {
+@@ -108,6 +111,12 @@
+         return PICOKEYS_EXEC_ERROR;
+     }
+ #endif
++#ifdef PICOKEYS_SE_HOOKS
++    /* Cardea Key: the PIN and the secret that wrapped the device key, if they live in the SE. */
++    if (cardea_se_pin_managed() && cardea_se_pin_erase(CARDEA_SE_PIN_FIDO) != CARDEA_SE_PIN_OK) {
++        return PICOKEYS_EXEC_ERROR;
++    }
++#endif
+     file_for_each_dynamic(fido_reset_dynamic_file, &context);
+     if (context.ret != PICOKEYS_OK) {
+         return context.ret;

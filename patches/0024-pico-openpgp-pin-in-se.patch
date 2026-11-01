@@ -1,0 +1,758 @@
+--- a/src/openpgp/cmd_change_pin.c
++++ b/src/openpgp/cmd_change_pin.c
+@@ -28,6 +28,11 @@
+     if (!pw1 || !file_has_data(pw1) || file_get_data(pw1)[0] < 8) {
+         return false;
+     }
++    if (pin_record_in_se(pw1)) {
++        /* Cardea: PW1 is in the secure element; comparing would spend a PW1 attempt. Admin-less
++         * mode is not enabled this way (it still is by changing PW1 while pending). */
++        return false;
++    }
+     if (file_get_size(pw1) == 33) {
+         verifier[0] = pin_len;
+         double_hash_pin(CONST_BYTE_ARRAY(pin, pin_len), verifier + 1);
+@@ -88,10 +93,10 @@
+         return r;
+     }
+ 
+-    uint8_t dhash[34];
+-    dhash[0] = new_pin_len;
+-    dhash[1] = 0x1; // Format
+-    pin_derive_verifier(CONST_BYTE_ARRAY(new_pin, new_pin_len), dhash + 2);
++    uint8_t dhash[34], new_session[32];
++    if (pin_record_change(fid, apdu.data, pin_len, new_pin, new_pin_len, dhash, new_session) != PICOKEYS_OK) {
++        return SW_EXEC_ERROR();
++    }
+     if (P2(apdu) == 0x81) {
+         file_t *tf = file_search_by_fid(EF_DEK_PW1, NULL, SPECIFY_EF);
+         if (!tf) {
+@@ -99,7 +104,7 @@
+         }
+         uint8_t def[DEK_FILE_SIZE];
+         def[0] = 0x3;
+-        pin_derive_session(CONST_BYTE_ARRAY(new_pin, new_pin_len), session_pw1);
++        memcpy(session_pw1, new_session, sizeof(session_pw1));
+         if ((r = encrypt_with_aad(session_pw1, CONST_BYTE_ARRAY(dek, DEK_SIZE), PIN_KDF_DEFAULT_VERSION, def + 1)) != PICOKEYS_OK) {
+             return SW_EXEC_ERROR();
+         }
+@@ -132,7 +137,7 @@
+         }
+         uint8_t def[DEK_FILE_SIZE];
+         def[0] = 0x3;
+-        pin_derive_session(CONST_BYTE_ARRAY(new_pin, new_pin_len), session_pw3);
++        memcpy(session_pw3, new_session, sizeof(session_pw3));
+         if ((r = encrypt_with_aad(session_pw3, CONST_BYTE_ARRAY(dek, DEK_SIZE), PIN_KDF_DEFAULT_VERSION, def + 1)) != PICOKEYS_OK) {
+             return SW_EXEC_ERROR();
+         }
+@@ -152,6 +157,7 @@
+         }
+ #endif
+     }
++    mbedtls_platform_zeroize(new_session, sizeof(new_session));
+     if (r != PICOKEYS_OK) {
+         return SW_MEMORY_FAILURE();
+     }
+--- a/src/openpgp/cmd_put_data.c
++++ b/src/openpgp/cmd_put_data.c
+@@ -138,18 +138,17 @@
+                 if ((r = load_dek()) != PICOKEYS_OK) {
+                     return SW_EXEC_ERROR();
+                 }
+-                uint8_t dhash[34];
+-                dhash[0] = apdu.nc;
+-                dhash[1] = 0x1; // Format
+-                pin_derive_verifier(CONST_BYTE_ARRAY(apdu.data, apdu.nc), dhash + 2);
+                 file_t *tf = file_search_by_fid(EF_DEK_RC, NULL, SPECIFY_EF);
+                 if (!tf) {
+                     return SW_REFERENCE_NOT_FOUND();
+                 }
++                uint8_t dhash[34];
++                if (pin_record_make(EF_RC, apdu.data, apdu.nc, true, dhash, session_rc) != PICOKEYS_OK) {
++                    return SW_EXEC_ERROR();
++                }
+ 
+                 uint8_t def[DEK_FILE_SIZE];
+                 def[0] = 0x3;
+-                pin_derive_session(CONST_BYTE_ARRAY(apdu.data, apdu.nc), session_rc);
+                 if ((r = encrypt_with_aad(session_rc, CONST_BYTE_ARRAY(dek, DEK_SIZE), PIN_KDF_DEFAULT_VERSION, def + 1)) != PICOKEYS_OK) {
+                     return SW_EXEC_ERROR();
+                 }
+--- a/src/openpgp/cmd_reset_retry.c
++++ b/src/openpgp/cmd_reset_retry.c
+@@ -54,7 +54,7 @@
+                 return r;
+             }
+             has_rc = true;
+-            pin_derive_session(CONST_BYTE_ARRAY(apdu.data, pin_len), session_rc);
++            pin_session_of(EF_RC, apdu.data, pin_len, session_rc);
+             has_pw1 = has_pw3 = false;
+             isUserAuthenticated = false;
+         }
+@@ -76,15 +76,14 @@
+         }
+         uint8_t def[DEK_FILE_SIZE];
+         def[0] = 0x03;
+-        pin_derive_session(CONST_BYTE_ARRAY(apdu.data + (apdu.nc - newpin_len), newpin_len), session_pw1);
++        uint8_t dhash[34];
++        if (pin_record_make(EF_PW1, apdu.data + (apdu.nc - newpin_len), newpin_len, true, dhash, session_pw1) != PICOKEYS_OK) {
++            return SW_EXEC_ERROR();
++        }
+         if ((r = encrypt_with_aad(session_pw1, CONST_BYTE_ARRAY(dek, DEK_SIZE), PIN_KDF_DEFAULT_VERSION, def + 1)) != PICOKEYS_OK) {
+             return SW_EXEC_ERROR();
+         }
+ 
+-        uint8_t dhash[34];
+-        dhash[0] = newpin_len;
+-        dhash[1] = 0x1; // Format
+-        pin_derive_verifier(CONST_BYTE_ARRAY(apdu.data + (apdu.nc - newpin_len), newpin_len), dhash + 2);
+         if ((r = pin_txn_stage(EF_PW1, dhash, session_pw1)) != PICOKEYS_OK) {
+             return SW_MEMORY_FAILURE();
+         }
+--- a/src/openpgp/openpgp.c
++++ b/src/openpgp/openpgp.c
+@@ -40,6 +40,9 @@
+ #include "mbedtls/eddsa.h"
+ #endif
+ #include "mbedtls/constant_time.h"
++#ifdef PICOKEYS_SE_HOOKS
++#include "cardea_se.h"
++#endif
+ 
+ bool has_pw1 = false;
+ bool has_pw2 = false;
+@@ -52,6 +55,146 @@
+ uint16_t algo_dec = EF_ALGO_PRIV2, algo_aut = EF_ALGO_PRIV3, pk_dec = EF_PK_DEC, pk_aut = EF_PK_AUT;
+ extern bool is_gpg;
+ 
++/*
++ * Cardea Key (issue #3): PINs in the secure element. With a backend that keeps PINs
++ * (cardea_se_pin_managed()), each PIN record (EF_PW1, EF_RC, EF_PW3, EF_PIV_PIN, EF_PIV_PUK) keeps
++ * its 34 bytes as [length, PIN_RECORD_FORMAT_SE, V]: the verifier and the retry counter live in the
++ * backend, and V is the verifier only when the value is a public default ("123456", "12345678", the
++ * PIV defaults, the KDF-DO defaults), so the factory-default checks keep working, else zeros. The
++ * session key that wraps the DEK is the slot secret of the backend. The counters in EF_PW_PRIV are
++ * a mirror for the status DOs; the backend is the one that blocks. A v0.1.0 record moves there on
++ * the first correct PIN. With the soft backend nothing changes: same records, same session keys.
++ */
++#define PIN_RECORD_FORMAT_SE 2
++
++#ifdef PICOKEYS_SE_HOOKS
++static uint8_t se_session[CARDEA_SE_PIN_SLOTS][32];
++
++static int pin_se_slot(uint16_t fid) {
++    switch (fid) {
++        case EF_PW1: return CARDEA_SE_PIN_PW1;
++        case EF_PW3: return CARDEA_SE_PIN_PW3;
++        case EF_RC: return CARDEA_SE_PIN_RC;
++        case EF_PIV_PIN: return CARDEA_SE_PIN_PIV;
++        case EF_PIV_PUK: return CARDEA_SE_PIN_PUK;
++        default: return -1;
++    }
++}
++
++static uint8_t pin_max_retries(uint16_t fid) {
++    file_t *ef = file_search_by_fid(EF_PW_RETRIES, NULL, SPECIFY_EF);
++    uint16_t i = fid & 0xf;
++    if (ef && file_has_data(ef) && file_get_size(ef) > i && file_get_data(ef)[i] > 0) {
++        return file_get_data(ef)[i];
++    }
++    return 3;
++}
++
++static bool pin_value_is_public_default(const uint8_t *value, size_t len);
++#endif
++
++bool pin_record_in_se(const file_t *pin) {
++    return pin && file_has_data(pin) && file_get_size(pin) == 34 && file_get_data(pin)[1] == PIN_RECORD_FORMAT_SE;
++}
++
++/* Format byte to rebuild a record for comparison: SE records keep the verifier of public defaults. */
++static uint8_t pin_record_format(const file_t *pin) {
++    return pin_record_in_se(pin) ? PIN_RECORD_FORMAT_SE : 0x1;
++}
++
++/*
++ * Record and session key for a new PIN value. With PINs in the secure element it also stores the
++ * PIN there: keep_secret = same slot secret (change, unblock: what is wrapped stays valid) when
++ * the slot exists, else a new one. session may be NULL.
++ */
++int pin_record_make(uint16_t fid, const uint8_t *value, size_t len, bool keep_secret, uint8_t record[34],
++                    uint8_t *session) {
++    record[0] = (uint8_t)len;
++#ifdef PICOKEYS_SE_HOOKS
++    int slot = pin_se_slot(fid);
++    if (slot >= 0 && cardea_se_pin_managed()) {
++        uint8_t secret[32];
++        int r = keep_secret && cardea_se_pin_present(slot)
++                ? cardea_se_pin_reset(slot, value, len, pin_max_retries(fid), secret)
++                : cardea_se_pin_set(slot, value, len, pin_max_retries(fid), secret);
++        if (r != CARDEA_SE_PIN_OK) {
++            return PICOKEYS_EXEC_ERROR;
++        }
++        memcpy(se_session[slot], secret, sizeof(secret));
++        if (session) {
++            memcpy(session, secret, sizeof(secret));
++        }
++        mbedtls_platform_zeroize(secret, sizeof(secret));
++        record[1] = PIN_RECORD_FORMAT_SE;
++        if (pin_value_is_public_default(value, len)) {
++            pin_derive_verifier(CONST_BYTE_ARRAY(value, len), record + 2);
++        }
++        else {
++            memset(record + 2, 0, 32);
++        }
++        return PICOKEYS_OK;
++    }
++#else
++    (void)fid;
++    (void)keep_secret;
++#endif
++    record[1] = 0x1; // Format
++    pin_derive_verifier(CONST_BYTE_ARRAY(value, len), record + 2);
++    if (session) {
++        pin_derive_session(CONST_BYTE_ARRAY(value, len), session);
++    }
++    return PICOKEYS_OK;
++}
++
++/*
++ * Record and session key for a PIN change, knowing the current PIN (already verified): with PINs in
++ * the secure element the slot is changed in place, keeping its secret and leaving nothing behind in
++ * the chip. Otherwise as pin_record_make.
++ */
++int pin_record_change(uint16_t fid, const uint8_t *old_value, size_t old_len, const uint8_t *value, size_t len,
++                      uint8_t record[34], uint8_t *session) {
++#ifdef PICOKEYS_SE_HOOKS
++    int slot = pin_se_slot(fid);
++    if (slot >= 0 && cardea_se_pin_managed() && cardea_se_pin_present(slot)) {
++        uint8_t secret[32], remaining = 0;
++        if (cardea_se_pin_change(slot, old_value, old_len, value, len, secret, &remaining) != CARDEA_SE_PIN_OK) {
++            return PICOKEYS_EXEC_ERROR;
++        }
++        memcpy(se_session[slot], secret, sizeof(secret));
++        if (session) {
++            memcpy(session, secret, sizeof(secret));
++        }
++        mbedtls_platform_zeroize(secret, sizeof(secret));
++        record[0] = (uint8_t)len;
++        record[1] = PIN_RECORD_FORMAT_SE;
++        if (pin_value_is_public_default(value, len)) {
++            pin_derive_verifier(CONST_BYTE_ARRAY(value, len), record + 2);
++        }
++        else {
++            memset(record + 2, 0, 32);
++        }
++        return PICOKEYS_OK;
++    }
++#endif
++    (void)old_value;
++    (void)old_len;
++    return pin_record_make(fid, value, len, true, record, session);
++}
++
++/* Session key of a PIN that has just been verified (or made). */
++void pin_session_of(uint16_t fid, const uint8_t *value, size_t len, uint8_t session[32]) {
++#ifdef PICOKEYS_SE_HOOKS
++    int slot = pin_se_slot(fid);
++    if (slot >= 0 && pin_record_in_se(file_search_by_fid(fid, NULL, SPECIFY_EF))) {
++        memcpy(session, se_session[slot], 32);
++        return;
++    }
++#else
++    (void)fid;
++#endif
++    pin_derive_session(CONST_BYTE_ARRAY(value, len), session);
++}
++
+ static bool pin_is_factory_default(const file_t *pin, const uint8_t *factory_pin, size_t factory_pin_len) {
+     uint8_t verifier[34];
+ 
+@@ -65,7 +208,7 @@
+     }
+     if (file_get_size(pin) == 34) {
+         verifier[0] = factory_pin_len;
+-        verifier[1] = 0x1;
++        verifier[1] = pin_record_format(pin);
+         pin_derive_verifier(CONST_BYTE_ARRAY(factory_pin, factory_pin_len), verifier + 2);
+         return mbedtls_ct_memcmp(file_get_data(pin), verifier, sizeof(verifier)) == 0;
+     }
+@@ -135,13 +278,30 @@
+     if (!pw3 || !dek_pw3) {
+         return PICOKEYS_ERR_FILE_NOT_FOUND;
+     }
+-    int r = file_put_data(pw3, CONST_BYTE_ARRAY(verifier, 34));
++    int r;
++#ifdef PICOKEYS_SE_HOOKS
++    uint8_t se_record[34];
++    if (cardea_se_pin_managed()) {
++        /* PW3 gets the PIN of PW1 in its own slot of the secure element */
++        if ((r = pin_record_make(EF_PW3, pin, pin_len, true, se_record, session_pw3)) != PICOKEYS_OK) {
++            return r;
++        }
++        verifier = se_record;
++    }
++#endif
++    r = file_put_data(pw3, CONST_BYTE_ARRAY(verifier, 34));
+     if (r != PICOKEYS_OK) {
+         return r;
+     }
+     uint8_t encrypted_dek[DEK_FILE_SIZE];
+     encrypted_dek[0] = 0x3;
++#ifdef PICOKEYS_SE_HOOKS
++    if (!cardea_se_pin_managed()) {
++        pin_derive_session(CONST_BYTE_ARRAY(pin, pin_len), session_pw3);
++    }
++#else
+     pin_derive_session(CONST_BYTE_ARRAY(pin, pin_len), session_pw3);
++#endif
+     r = encrypt_with_aad(session_pw3, CONST_BYTE_ARRAY(dek, DEK_SIZE), PIN_KDF_DEFAULT_VERSION, encrypted_dek + 1);
+     if (r != PICOKEYS_OK) {
+         return r;
+@@ -191,7 +351,7 @@
+     }
+     if (file_get_size(pin) == 34) {
+         verifier[0] = value_len;
+-        verifier[1] = 0x1;
++        verifier[1] = pin_record_format(pin);
+         pin_derive_verifier(CONST_BYTE_ARRAY(value, value_len), verifier + 2);
+         return mbedtls_ct_memcmp(file_get_data(pin), verifier, sizeof(verifier)) == 0;
+     }
+@@ -275,6 +435,11 @@
+     if (r == PICOKEYS_OK) {
+         r = set_reset_code_retries(0);
+     }
++#ifdef PICOKEYS_SE_HOOKS
++    if (r == PICOKEYS_OK && cardea_se_pin_managed() && cardea_se_pin_erase(CARDEA_SE_PIN_RC) != CARDEA_SE_PIN_OK) {
++        r = PICOKEYS_EXEC_ERROR;
++    }
++#endif
+     has_rc = false;
+     mbedtls_platform_zeroize(session_rc, sizeof(session_rc));
+     return r;
+@@ -355,6 +520,7 @@
+     }
+     bool reset_dek = false;
+     bool bootstrap_legacy = false;
++    bool se_records = false;   /* Cardea: PW1/PW3 records already written with the DEK (PINs in the SE) */
+     file_t *ef_dek = file_search_by_fid(EF_DEK, NULL, SPECIFY_ANY), *ef_dek_pw1 = file_search_by_fid(EF_DEK_PW1, NULL, SPECIFY_ANY), *ef_dek_rc = file_search_by_fid(EF_DEK_RC, NULL, SPECIFY_ANY), *ef_dek_pw3 = file_search_by_fid(EF_DEK_PW3, NULL, SPECIFY_ANY);
+     file_t *pw1 = file_search_by_fid(EF_PW1, NULL, SPECIFY_ANY), *pw3 = file_search_by_fid(EF_PW3, NULL, SPECIFY_ANY);
+     bool provisioning = !file_has_data(pw1) && !file_has_data(pw3);
+@@ -384,12 +550,28 @@
+         uint8_t def[DEK_FILE_SIZE];
+         def[0] = 0x3; // Format
+ 
+-        pin_derive_session(CONST_BYTE_ARRAY(def1, sizeof(def1)), session_pw1);
++#ifdef PICOKEYS_SE_HOOKS
++        if (cardea_se_pin_managed()) {
++            /* default PW1/PW3 created in the secure element now: the DEK is wrapped with their secrets */
++            uint8_t rec[34];
++            pin_record_make(EF_PW1, def1, sizeof(def1), false, rec, session_pw1);
++            file_put_data(pw1, CONST_BYTE_ARRAY(rec, sizeof(rec)));
++            pin_record_make(EF_PW3, def3, sizeof(def3), false, rec, session_pw3);
++            file_put_data(pw3, CONST_BYTE_ARRAY(rec, sizeof(rec)));
++            se_records = true;
++        }
++        else
++#endif
++        {
++            pin_derive_session(CONST_BYTE_ARRAY(def1, sizeof(def1)), session_pw1);
++        }
+         encrypt_with_aad(session_pw1, CONST_BYTE_ARRAY(random_dek, DEK_SIZE), PIN_KDF_DEFAULT_VERSION, def + 1);
+         mbedtls_platform_zeroize(session_pw1, sizeof(session_pw1));
+         file_put_data(ef_dek_pw1, CONST_BYTE_ARRAY(def, sizeof(def)));
+ 
+-        pin_derive_session(CONST_BYTE_ARRAY(def3, sizeof(def3)), session_pw3);
++        if (!se_records) {
++            pin_derive_session(CONST_BYTE_ARRAY(def3, sizeof(def3)), session_pw3);
++        }
+         encrypt_with_aad(session_pw3, CONST_BYTE_ARRAY(random_dek, DEK_SIZE), PIN_KDF_DEFAULT_VERSION, def + 1);
+         mbedtls_platform_zeroize(session_pw3, sizeof(session_pw3));
+         file_put_data(ef_dek_pw3, CONST_BYTE_ARRAY(def, sizeof(def)));
+@@ -398,7 +580,7 @@
+         reset_dek = true;
+     }
+     if ((ef = file_search_by_fid(EF_PW1, NULL, SPECIFY_ANY))) {
+-        if (!ef->data || reset_dek) {
++        if ((!ef->data || reset_dek) && !se_records) {
+             printf("PW1 is empty. Initializing with default password\r\n");
+             const uint8_t def[6] = { 0x31, 0x32, 0x33, 0x34, 0x35, 0x36 };
+             uint8_t dhash[34];
+@@ -408,15 +590,13 @@
+                 file_put_data(ef, CONST_BYTE_ARRAY(dhash, 33));
+             }
+             else {
+-                dhash[0] = sizeof(def);
+-                dhash[1] = 0x1; // Format
+-                pin_derive_verifier(CONST_BYTE_ARRAY(def, sizeof(def)), dhash + 2);
++                pin_record_make(ef->fid, def, sizeof(def), false, dhash, NULL);
+                 file_put_data(ef, CONST_BYTE_ARRAY(dhash, sizeof(dhash)));
+             }
+         }
+     }
+     if ((ef = file_search_by_fid(EF_PW3, NULL, SPECIFY_ANY))) {
+-        if (!ef->data || reset_dek) {
++        if ((!ef->data || reset_dek) && !se_records) {
+             printf("PW3 is empty. Initializing with default password\r\n");
+ 
+             const uint8_t def[8] = { 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38 };
+@@ -427,9 +607,7 @@
+                 file_put_data(ef, CONST_BYTE_ARRAY(dhash, 33));
+             }
+             else {
+-                dhash[0] = sizeof(def);
+-                dhash[1] = 0x1; // Format
+-                pin_derive_verifier(CONST_BYTE_ARRAY(def, sizeof(def)), dhash + 2);
++                pin_record_make(ef->fid, def, sizeof(def), false, dhash, NULL);
+                 file_put_data(ef, CONST_BYTE_ARRAY(dhash, sizeof(dhash)));
+             }
+         }
+@@ -642,7 +820,7 @@
+         return false;
+     }
+     verifier[0] = value_len;
+-    verifier[1] = 0x1;
++    verifier[1] = pin_record_format(pin);
+     pin_derive_verifier(CONST_BYTE_ARRAY(value, value_len), verifier + 2);
+     return mbedtls_ct_memcmp(file_get_data(pin), verifier, sizeof(verifier)) == 0;
+ }
+@@ -800,10 +978,10 @@
+     if (!pin || !dek_file || value_len > 127u) {
+         return PICOKEYS_ERR_FILE_NOT_FOUND;
+     }
+-    verifier[0] = value_len;
+-    verifier[1] = 0x1;
+-    pin_derive_verifier(CONST_BYTE_ARRAY(value, value_len), verifier + 2);
+-    pin_derive_session(CONST_BYTE_ARRAY(value, value_len), session);
++    r = pin_record_make(fid, value, value_len, false, verifier, session);
++    if (r != PICOKEYS_OK) {
++        return r;
++    }
+     encrypted_dek[0] = 0x3;
+     r = encrypt_with_aad(session, CONST_BYTE_ARRAY(dek, DEK_SIZE), PIN_KDF_DEFAULT_VERSION, encrypted_dek + 1);
+     if (r == PICOKEYS_OK) {
+@@ -951,7 +1129,7 @@
+         return pin_txn_delete(pin->fid);
+     }
+     uint8_t session[32];
+-    pin_derive_session(CONST_BYTE_ARRAY(data, len), session);
++    pin_session_of(pin->fid, data, len, session);
+     r = decrypt_with_aad(session, CONST_BYTE_ARRAY(payload + 37, DEK_AAD_SIZE), PIN_KDF_DEFAULT_VERSION, dek);
+     mbedtls_platform_zeroize(session, sizeof(session));
+     if (r == PICOKEYS_OK) {
+@@ -1366,6 +1544,122 @@
+     return PICOKEYS_OK;
+ }
+ 
++#ifdef PICOKEYS_SE_HOOKS
++static bool pin_value_is_public_default(const uint8_t *value, size_t len) {
++    static const uint8_t pw1_default[] = "123456", pw3_default[] = "12345678";
++    static const uint8_t piv_pin_default[] = { 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF };
++    if ((len == 6 && memcmp(value, pw1_default, 6) == 0) || (len == 8 && memcmp(value, pw3_default, 8) == 0) ||
++        (len == 8 && memcmp(value, piv_pin_default, 8) == 0)) {
++        return true;
++    }
++    file_t *kdf = file_search_by_fid(EF_KDF, NULL, SPECIFY_EF);
++    const uint8_t *kdf_pw1 = NULL, *kdf_pw3 = NULL;
++    if (len == 32 && kdf && file_has_data(kdf) && file_get_size(kdf) != sizeof(openpgp_kdf_off) &&
++        openpgp_kdf_parse(file_get_data(kdf), file_get_size(kdf), &kdf_pw1, &kdf_pw3)) {
++        return memcmp(value, kdf_pw1, 32) == 0 || memcmp(value, kdf_pw3, 32) == 0;
++    }
++    return false;
++}
++
++/* Mirror of the backend counter in EF_PW_PRIV, for the status DOs. */
++static void pin_mirror_retries(const file_t *pin, uint8_t retries) {
++    file_t *pw_status = file_search_by_fid(EF_PW_PRIV, NULL, SPECIFY_EF);
++    uint16_t i = 3u + (pin->fid & 0xfu);
++    if (!pw_status || !file_has_data(pw_status) || file_get_size(pw_status) > 64 || i >= file_get_size(pw_status) ||
++        file_get_data(pw_status)[i] == retries) {
++        return;
++    }
++    uint8_t status[64];
++    uint16_t status_len = file_get_size(pw_status);
++    memcpy(status, file_get_data(pw_status), status_len);
++    status[i] = retries;
++    file_put_data(pw_status, CONST_BYTE_ARRAY(status, status_len));
++    flash_commit();
++}
++
++static int pin_check_se(const file_t *pin, const uint8_t *data, size_t len, bool *mismatch) {
++    int slot = pin_se_slot(pin->fid);
++    uint8_t secret[32], remaining = 0;
++    int r = slot < 0 ? CARDEA_SE_PIN_ERROR : cardea_se_pin_verify(slot, data, len, secret, &remaining);
++    if (r == CARDEA_SE_PIN_OK) {
++        memcpy(se_session[slot], secret, sizeof(secret));
++        mbedtls_platform_zeroize(secret, sizeof(secret));
++        if (pin_reset_retries(pin, true) != PICOKEYS_OK) {
++            return SW_MEMORY_FAILURE();
++        }
++        return SW_OK();
++    }
++    if (r == CARDEA_SE_PIN_BLOCKED) {
++        pin_mirror_retries(pin, 0);
++        return SW_PIN_BLOCKED();
++    }
++    if (r != CARDEA_SE_PIN_WRONG) {
++        return SW_MEMORY_FAILURE();
++    }
++    if (mismatch) {
++        *mismatch = true;
++    }
++    pin_mirror_retries(pin, remaining);
++    return remaining == 0 ? SW_PIN_BLOCKED() : set_res_sw(0x63, 0xc0 | remaining);
++}
++
++static uint16_t pin_dek_fid(uint16_t fid) {
++    return fid == EF_PW1 ? EF_DEK_PW1 : fid == EF_PW3 ? EF_DEK_PW3 : fid == EF_RC ? EF_DEK_RC : fid == EF_PIV_PIN ? EF_DEK_PWPIV : 0;
++}
++
++/*
++ * Moves a PIN that has just been checked the v0.1.0 way into the secure element: new slot
++ * secret, its DEK file wrapped again with it, record in the SE format. PW1/PW3/RC go through
++ * pin_txn, so a power cut leaves either the old state (and the next correct PIN moves it again) or
++ * a journal that the next correct PIN completes. If the DEK of this PIN cannot be opened with it,
++ * the PIN stays in flash.
++ */
++static int pin_move_to_se(const file_t *pin, const uint8_t *value, size_t len) {
++    uint16_t dek_fid = pin_dek_fid(pin->fid);
++    file_t *ef_dek = dek_fid ? file_search_by_fid(dek_fid, NULL, SPECIFY_EF) : NULL;
++    uint8_t plain[DEK_SIZE], session[32], record[34], wrapped[DEK_FILE_SIZE];
++    int r = PICOKEYS_OK;
++    if (pin_se_slot(pin->fid) < 0) {
++        return PICOKEYS_OK;
++    }
++    if (dek_fid) {
++        if (!ef_dek || !file_has_data(ef_dek) || file_get_size(ef_dek) != DEK_FILE_SIZE || file_get_data(ef_dek)[0] != 0x3) {
++            return PICOKEYS_OK;   /* no DEK file in the current format: leave it in flash */
++        }
++        pin_derive_session(CONST_BYTE_ARRAY(value, len), session);
++        r = decrypt_with_aad(session, CONST_BYTE_ARRAY(file_get_data(ef_dek) + 1, DEK_AAD_SIZE), PIN_KDF_DEFAULT_VERSION, plain);
++        mbedtls_platform_zeroize(session, sizeof(session));
++        if (r != PICOKEYS_OK) {
++            mbedtls_platform_zeroize(plain, sizeof(plain));
++            return PICOKEYS_OK;
++        }
++    }
++    r = pin_record_make(pin->fid, value, len, false, record, session);
++    if (r == PICOKEYS_OK && dek_fid) {
++        wrapped[0] = 0x3;
++        r = encrypt_with_aad(session, CONST_BYTE_ARRAY(plain, DEK_SIZE), PIN_KDF_DEFAULT_VERSION, wrapped + 1);
++        if (r == PICOKEYS_OK && pin_txn_layout(pin->fid)) {
++            memcpy(dek, plain, DEK_SIZE);   /* pin_txn_stage wraps the global DEK */
++            r = pin_txn_stage(pin->fid, record, session);
++        }
++    }
++    if (r == PICOKEYS_OK) {
++        r = file_put_data((file_t *)pin, CONST_BYTE_ARRAY(record, sizeof(record)));
++    }
++    if (r == PICOKEYS_OK && dek_fid) {
++        r = file_put_data(ef_dek, CONST_BYTE_ARRAY(wrapped, sizeof(wrapped)));
++    }
++    if (r == PICOKEYS_OK && dek_fid && pin_txn_layout(pin->fid)) {
++        r = pin_txn_delete(pin->fid);
++    }
++    flash_commit();
++    mbedtls_platform_zeroize(plain, sizeof(plain));
++    mbedtls_platform_zeroize(session, sizeof(session));
++    mbedtls_platform_zeroize(wrapped, sizeof(wrapped));
++    return r;
++}
++#endif
++
+ int pin_check_verifier(const file_t *pin, const uint8_t *data, size_t len, uint8_t offset, bool *mismatch) {
+     if (!file_has_data(pin)) {
+         return SW_REFERENCE_NOT_FOUND();
+@@ -1373,6 +1667,11 @@
+     if (mismatch) {
+         *mismatch = false;
+     }
++#ifdef PICOKEYS_SE_HOOKS
++    if (pin_record_in_se(pin)) {
++        return pin_check_se(pin, data, len, mismatch);
++    }
++#endif
+     if (file_get_size(pin) != sizeof(uint8_t[32]) + offset || (offset == 2 && file_get_data(pin)[1] != 1u)) {
+         return SW_CONDITIONS_NOT_SATISFIED();
+     }
+@@ -1403,6 +1702,11 @@
+     if (pin_reset_retries(pin, true) != PICOKEYS_OK) {
+         return SW_MEMORY_FAILURE();
+     }
++#ifdef PICOKEYS_SE_HOOKS
++    if (offset == 2 && cardea_se_pin_managed() && pin_move_to_se(pin, data, len) != PICOKEYS_OK) {
++        return SW_MEMORY_FAILURE();
++    }
++#endif
+     return SW_OK();
+ }
+ 
+@@ -1524,11 +1828,11 @@
+         else {
+             has_pw2 = true;
+         }
+-        pin_derive_session(CONST_BYTE_ARRAY(data, len), session_pw1);
++        pin_session_of(pin->fid, data, len, session_pw1);
+     }
+     else if (pin->fid == EF_PW3) {
+         has_pw3 = true;
+-        pin_derive_session(CONST_BYTE_ARRAY(data, len), session_pw3);
++        pin_session_of(pin->fid, data, len, session_pw3);
+     }
+     if (pin->fid == EF_PW1 || pin->fid == EF_PW3 || pin->fid == EF_RC) {
+         if (pin_txn_recover(pin, data, len) != PICOKEYS_OK) {
+--- a/src/openpgp/openpgp.h
++++ b/src/openpgp/openpgp.h
+@@ -53,6 +53,13 @@
+ extern int pin_reset_retries(const file_t *pin, bool force);
+ extern int pin_spend_retry(const file_t *pin, uint8_t *remaining);
+ extern int pin_check_verifier(const file_t *pin, const uint8_t *data, size_t len, uint8_t offset, bool *mismatch);
++/* Cardea Key (issue #3): PIN records and session keys, in flash or in the secure element */
++extern bool pin_record_in_se(const file_t *pin);
++extern int pin_record_make(uint16_t fid, const uint8_t *value, size_t len, bool keep_secret, uint8_t record[34],
++                           uint8_t *session);
++extern int pin_record_change(uint16_t fid, const uint8_t *old_value, size_t old_len, const uint8_t *value, size_t len,
++                             uint8_t record[34], uint8_t *session);
++extern void pin_session_of(uint16_t fid, const uint8_t *value, size_t len, uint8_t session[32]);
+ 
+ #define ALGO_RSA        0x01
+ #define ALGO_ECDH       0x12
+--- a/src/openpgp/piv.c
++++ b/src/openpgp/piv.c
+@@ -261,7 +261,7 @@
+             file_put_data(ef, CONST_BYTE_ARRAY(def, sizeof(def)));
+         }
+     }
+-    bool reset_dek = false;
++    bool reset_dek = false, se_pin_record = false;
+     if ((ef = file_search_by_fid(EF_DEK_PWPIV, NULL, SPECIFY_ANY)) && !file_has_data(ef)) {
+         printf("DEK PIV is empty or older\r\n");
+         const uint8_t defpin[8] = { 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF };
+@@ -270,7 +270,15 @@
+         uint8_t def[DEK_FILE_SIZE];
+         def[0] = 0x3; // Format
+ 
+-        pin_derive_session(CONST_BYTE_ARRAY(defpin, sizeof(defpin)), session_pwpiv);
++        file_t *ef_pin = file_search_by_fid(EF_PIV_PIN, NULL, SPECIFY_ANY);
++        uint8_t rec[34];
++        /* default PIN record (in the secure element if PINs live there) and its session key */
++        pin_record_make(EF_PIV_PIN, defpin, sizeof(defpin), false, rec, session_pwpiv);
++        if (ef_pin && rec[1] == 2) {
++            file_put_data(ef_pin, CONST_BYTE_ARRAY(rec, sizeof(rec)));
++            se_pin_record = true;
++        }
++        mbedtls_platform_zeroize(rec, sizeof(rec));
+         encrypt_with_aad(session_pwpiv, CONST_BYTE_ARRAY(random_dek, DEK_SIZE), PIN_KDF_DEFAULT_VERSION, def + 1);
+         mbedtls_platform_zeroize(session_pwpiv, sizeof(session_pwpiv));
+         file_put_data(ef, CONST_BYTE_ARRAY(def, sizeof(def)));
+@@ -282,13 +290,11 @@
+         reset_dek = true;
+     }
+     if ((ef = file_search_by_fid(EF_PIV_PIN, NULL, SPECIFY_ANY))) {
+-        if (!ef->data || reset_dek) {
++        if ((!ef->data || reset_dek) && !se_pin_record) {
+             printf("PIV PIN is empty. Initializing with default password\r\n");
+             const uint8_t def[8] = { 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF };
+             uint8_t dhash[34];
+-            dhash[0] = sizeof(def);
+-            dhash[1] = 0x1; // Format
+-            pin_derive_verifier(CONST_BYTE_ARRAY(def, sizeof(def)), dhash + 2);
++            pin_record_make(EF_PIV_PIN, def, sizeof(def), false, dhash, NULL);
+             file_put_data(ef, CONST_BYTE_ARRAY(dhash, sizeof(dhash)));
+         }
+     }
+@@ -297,9 +303,7 @@
+             printf("PIV PUK is empty. Initializing with default password\r\n");
+             const uint8_t def[8] = { 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38 };
+             uint8_t dhash[34];
+-            dhash[0] = sizeof(def);
+-            dhash[1] = 0x1; // Format
+-            pin_derive_verifier(CONST_BYTE_ARRAY(def, sizeof(def)), dhash + 2);
++            pin_record_make(EF_PIV_PUK, def, sizeof(def), false, dhash, NULL);
+             file_put_data(ef, CONST_BYTE_ARRAY(dhash, sizeof(dhash)));
+         }
+     }
+--- a/src/piv/cmd_change_pin.c
++++ b/src/piv/cmd_change_pin.c
+@@ -38,9 +38,10 @@
+     }
+ 
+     uint8_t dhash[34];
+-    dhash[0] = PIV_PIN_WIRE_SIZE;
+-    dhash[1] = 0x1; // Format
+-    pin_derive_verifier(CONST_BYTE_ARRAY(new_pin, PIV_PIN_WIRE_SIZE), dhash + 2);
++    /* in the secure element the slot is changed in place and keeps its secret */
++    if (pin_record_change(ef->fid, old_pin, PIV_PIN_WIRE_SIZE, new_pin, PIV_PIN_WIRE_SIZE, dhash, NULL) != PICOKEYS_OK) {
++        return SW_EXEC_ERROR();
++    }
+     file_put_data(ef, CONST_BYTE_ARRAY(dhash, sizeof(dhash)));
+     flash_commit();
+     return SW_OK();
+--- a/src/piv/cmd_get_metadata.c
++++ b/src/piv/cmd_get_metadata.c
+@@ -128,11 +128,11 @@
+         bool is_default;
+         if (key_ref == EF_PIV_PIN) {
+             pin_derive_verifier(CONST_BYTE_ARRAY((const uint8_t *)"\x31\x32\x33\x34\x35\x36\xFF\xFF", 8), dhash);
+-            eq = file_get_size(ef_key) == 34u && file_get_data(ef_key)[1] == 1u ? mbedtls_ct_memcmp(dhash, file_get_data(ef_key) + 2, sizeof(dhash)) : -1;
++            eq = file_get_size(ef_key) == 34u && (file_get_data(ef_key)[1] == 1u || pin_record_in_se(ef_key)) ? mbedtls_ct_memcmp(dhash, file_get_data(ef_key) + 2, sizeof(dhash)) : -1;
+         }
+         else if (key_ref == EF_PIV_PUK) {
+             pin_derive_verifier(CONST_BYTE_ARRAY((const uint8_t *)"\x31\x32\x33\x34\x35\x36\x37\x38", 8), dhash);
+-            eq = file_get_size(ef_key) == 34u && file_get_data(ef_key)[1] == 1u ? mbedtls_ct_memcmp(dhash, file_get_data(ef_key) + 2, sizeof(dhash)) : -1;
++            eq = file_get_size(ef_key) == 34u && (file_get_data(ef_key)[1] == 1u || pin_record_in_se(ef_key)) ? mbedtls_ct_memcmp(dhash, file_get_data(ef_key) + 2, sizeof(dhash)) : -1;
+         }
+         else if (key_ref == EF_PIV_KEY_CARDMGM) {
+             uint8_t management_key[32] = { 0 };
+--- a/src/piv/cmd_reset_retry.c
++++ b/src/piv/cmd_reset_retry.c
+@@ -36,9 +36,9 @@
+         return ret;
+     }
+     uint8_t dhash[34];
+-    dhash[0] = PIV_PIN_WIRE_SIZE;
+-    dhash[1] = 0x1; // Format
+-    pin_derive_verifier(CONST_BYTE_ARRAY(new_pin, PIV_PIN_WIRE_SIZE), dhash + 2);
++    if (pin_record_make(EF_PIV_PIN, new_pin, PIV_PIN_WIRE_SIZE, true, dhash, NULL) != PICOKEYS_OK) {
++        return SW_EXEC_ERROR();
++    }
+     ef = file_search_by_fid(EF_PIV_PIN, NULL, SPECIFY_ANY);
+     if (!ef) {
+         return SW_REFERENCE_NOT_FOUND();
+--- a/src/piv/cmd_set_retries.c
++++ b/src/piv/cmd_set_retries.c
+@@ -48,17 +48,17 @@
+     const uint8_t def_pin[8] = { 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0xFF, 0xFF };
+ 
+     uint8_t dhash[34];
+-    dhash[0] = sizeof(def_pin);
+-    dhash[1] = 0x1; // Format
+-    pin_derive_verifier(CONST_BYTE_ARRAY(def_pin, sizeof(def_pin)), dhash + 2);
++    if (pin_record_make(EF_PIV_PIN, def_pin, sizeof(def_pin), true, dhash, NULL) != PICOKEYS_OK) {
++        return SW_EXEC_ERROR();
++    }
+     file_put_data(ef, CONST_BYTE_ARRAY(dhash, sizeof(dhash)));
+     pin_reset_retries(ef, true);
+ 
+     ef = file_search_by_fid(EF_PIV_PUK, NULL, SPECIFY_ANY);
+     const uint8_t def_puk[8] = {0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38};
+-    dhash[0] = sizeof(def_puk);
+-    dhash[1] = 0x1; // Format
+-    pin_derive_verifier(CONST_BYTE_ARRAY(def_puk, sizeof(def_puk)), dhash + 2);
++    if (pin_record_make(EF_PIV_PUK, def_puk, sizeof(def_puk), true, dhash, NULL) != PICOKEYS_OK) {
++        return SW_EXEC_ERROR();
++    }
+     file_put_data(ef, CONST_BYTE_ARRAY(dhash, sizeof(dhash)));
+     pin_reset_retries(ef, true);
+ 
+--- a/src/piv/cmd_verify.c
++++ b/src/piv/cmd_verify.c
+@@ -56,7 +56,7 @@
+         uint16_t ret = pin_check_verifier(pw, apdu.data, apdu.nc, 2, NULL);
+         if (ret == 0x9000) {
+             has_pwpiv = true;
+-            pin_derive_session(CONST_BYTE_ARRAY(apdu.data, apdu.nc), session_pwpiv);
++            pin_session_of(EF_PIV_PIN, apdu.data, apdu.nc, session_pwpiv);
+         }
+         return ret; //SW already set
+     }

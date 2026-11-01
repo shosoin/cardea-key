@@ -2,16 +2,19 @@
 
 ## Status
 
-Cardea Key is a **prototype**. It has not been audited, it is not FIDO-certified, and phase 0 runs
-on a bare Raspberry Pi Pico 2 without a secure element. Use it to experiment, not as your only key.
+Cardea Key is an **experimental prototype**. It has not been audited and it is not FIDO-certified.
+The `soft` build runs on a bare Raspberry Pi Pico 2; the `se05x` build adds an NXP SE051 secure
+element but has only been validated against a simulated chip so far. Use it to experiment, not as
+your only key.
 
 ## What the prototype protects against, and what it does not
 
 - Secrets are stored in the RP2350's external flash, encrypted. In the default build
   (`HARDEN_HARDWARE=OFF`) the key that protects them is also kept in flash, so the board stays
   reusable. **Anyone with physical access can dump the flash**, so assume a lost prototype is a
-  compromised one. Phase 1 moves the PIN check, the retry counter and the root key into an
-  NXP SE051 secure element.
+  compromised one. The `se05x` build moves the PIN check, the retry counter and the root key into
+  an NXP SE051 secure element, over an SCP03 channel; but it still runs in test mode (public
+  factory channel keys, master key also kept in flash), so for now the same applies to it.
 - User presence is a real button press (see `FORCE_BUTTON_WAIT`), and destructive operations
   (FIDO reset, master-key restore) require it. Master-key restore also requires the PIN.
 - Release binaries are not signed; each release lists their SHA-256. Building from source is the way
