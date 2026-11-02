@@ -152,10 +152,12 @@ CA. Details and the `scripts/cardea-vault.py` tool: [docs/vault.md](docs/vault.m
 | 0 | Unify pico-fido and pico-openpgp in one firmware; test on a bare Pico 2 without touching OTP | **done** |
 | 1 | NXP SE051C2 secure element: PIN and retry counter in the SE, root key out of the flash | **done** on a simulated chip (v0.2.0; v0.3.0 follows upstream `main`); real-chip tests pending |
 | 2 | Fingerprint sensor as user presence, time-limited biometric unlock | planned |
-| 3 | Own PCB | after 0-2 |
+| 3 | Full prototype: Pico 2 + real SE051C2 + fingerprint sensor, tested together as one key | parts on the way |
+| 4 | Own PCB (RP2354A + SE051C2 + sensor connector) | **design in progress**: [rev A draft](hardware/README.md), schematic done, placement draft, not routed; manufactured only after phase 3 |
 
 ## License
 
 [AGPL-3.0](LICENSE), the license of the upstream projects. Patches and tools in this repository
-are released under the same license. "Pico Keys" is a trademark of its owner; this project does
+are released under the same license. The hardware design files in [hardware/](hardware/README.md)
+are licensed under [CERN-OHL-S-2.0](hardware/LICENSE). "Pico Keys" is a trademark of its owner; this project does
 not use that name.
