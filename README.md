@@ -20,7 +20,7 @@ combines in a single firmware what usually needs several keys:
 Website: <https://cardeakey.org>
 
 > **Status: experimental prototype, not audited.** Phase 0 (one unified firmware, tested on a bare
-> Pico 2) and phase 1 (NXP SE051 secure element support) are released as **v0.2.0**. Phase 1 has
+> Pico 2) and phase 1 (NXP SE051 secure element support) are released as **v0.3.0**. Phase 1 has
 > been validated against a simulated SE05x only, **not yet on a real SE051C2** chip. Do not rely on
 > it as your only key. Next: tests on the real chip, then a fingerprint sensor. See
 > [Roadmap](#roadmap).
@@ -41,10 +41,13 @@ the issues we found while testing, among them:
 - **The firmware never writes the RP2350 OTP** unless you explicitly build with
   `HARDEN_HARDWARE=ON`. Upstream writes and locks OTP keys on first boot, which is irreversible.
   With the default build your Pico 2 stays a generic, reusable board.
-- **User presence is really required**: the button must be pressed for passkey creation *and*
-  sign-in, FIDO reset, U2F, OATH "touch" accounts and OTP challenge-response. Upstream's default
-  reports user presence without a press.
-- **Master-key restore requires the PIN**, not just a button press.
+- **OTP challenge-response with touch over the HID keyboard**, in asynchronous mode as YubiKeys
+  do (used for example by KeePassXC). Upstream denies it.
+- Bugs we reported were fixed upstream by Pol within a day (user presence really required for
+  sign-in, FIDO reset, U2F and OATH "touch" accounts; master-key restore requires the PIN; the
+  3-wrong-PINs-per-power-up lock; OTP over HID no longer corrupting the card thread). We follow his
+  `main` and dropped our own versions of those fixes; see
+  [patches/README.md](patches/README.md#fixes-now-in-upstream-dropped-on-2026-11-02).
 - **Vault** with a replaceable root CA (see [docs/vault.md](docs/vault.md)).
 
 ## Hardware
@@ -147,7 +150,7 @@ CA. Details and the `scripts/cardea-vault.py` tool: [docs/vault.md](docs/vault.m
 | Phase | What | Status |
 |---|---|---|
 | 0 | Unify pico-fido and pico-openpgp in one firmware; test on a bare Pico 2 without touching OTP | **done** |
-| 1 | NXP SE051C2 secure element: PIN and retry counter in the SE, root key out of the flash | **done** on a simulated chip (v0.2.0); real-chip tests pending |
+| 1 | NXP SE051C2 secure element: PIN and retry counter in the SE, root key out of the flash | **done** on a simulated chip (v0.2.0; v0.3.0 follows upstream `main`); real-chip tests pending |
 | 2 | Fingerprint sensor as user presence, time-limited biometric unlock | planned |
 | 3 | Own PCB | after 0-2 |
 

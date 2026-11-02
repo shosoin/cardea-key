@@ -9,7 +9,7 @@
 #      pico-keys-sdk/third-party/ con su fichero marcador, para que CMake no vuelva a clonarlas
 #      (compilar con -DPICOKEYS_FETCH_DEPS_ON_DEMAND=OFF).
 #   3. Sustituye el submódulo pico-keys-sdk de pico-fido y pico-openpgp por un enlace a una única
-#      copia (SDK 9.2), que es la que llevará el firmware unificado.
+#      copia (SDK 9.2 + main d8fce97), que es la que llevará el firmware unificado.
 #   4. Aplica los parches de patches/ (sobre todo: sin escrituras en la OTP del RP2350).
 #
 # Idempotente: si un repo ya existe, solo comprueba que está en el commit esperado.
@@ -21,9 +21,9 @@ mkdir -p "$TP"
 
 # nombre  url  commit
 REPOS=(
-  "pico-fido     https://github.com/polhenarejos/pico-fido.git       b1df38dbab49b7365282e1bad12f0c38862cf643"
+  "pico-fido     https://github.com/polhenarejos/pico-fido.git       feff531320e1f2d4b7249a4cf4684f056002242b"
   "pico-openpgp  https://github.com/polhenarejos/pico-openpgp.git    6834e379aae472a3fd01173a212fff7ee730b870"
-  "pico-keys-sdk https://github.com/polhenarejos/pico-keys-sdk.git   a2f0a51588fb523f2d6614e008b4bdbb45e443f1"
+  "pico-keys-sdk https://github.com/polhenarejos/pico-keys-sdk.git   d8fce97ca761eb763869c77cc4d3b6fd0be1caf5"
   "pico-sdk      https://github.com/raspberrypi/pico-sdk.git         079c6f39023649b154152db30f1d781e884879bc"
   "picotool      https://github.com/raspberrypi/picotool.git         2041936441b48a3cc53ae3da9e805229fe8f4e18"
   "plug-and-trust https://github.com/NXP/plug-and-trust.git          7102413e0457d3dfa4fc4be686ca8ec50bd9f5e2"
@@ -41,7 +41,7 @@ clone_at() { # dir url commit
     git clone -q "$url" "$dir"
   fi
   if [[ "$(git -C "$dir" rev-parse HEAD)" != "$commit" ]]; then
-    git -C "$dir" fetch -q origin
+    git -C "$dir" fetch -q --no-recurse-submodules origin
     git -C "$dir" checkout -q "$commit"
   fi
   echo "ok  $(basename "$dir") @ ${commit:0:12}"
